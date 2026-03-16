@@ -24,7 +24,7 @@ WASM_PATH="target/wasm32-wasip2/release/slack_channel.wasm"
 
 if [ -f "$WASM_PATH" ]; then
     # Create component if needed
-    wasm-tools component new "$WASM_PATH" -o slack.wasm 2>/dev/null || cp "$WASM_PATH" slack.wasm
+    wasm-tools component new "$WASM_PATH" -o slack.wasm 2>/dev/null || { cp "$WASM_PATH" slack.wasm 2>/dev/null || powershell -Command "Copy-Item -Path '$WASM_PATH' -Destination 'slack.wasm'"; }
 
     # Optimize the component
     wasm-tools strip slack.wasm -o slack.wasm

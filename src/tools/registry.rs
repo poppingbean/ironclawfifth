@@ -76,6 +76,8 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "image_edit",
     "image_analyze",
     "tool_info",
+    "hyperliquid_analyze",
+    "hyperliquid_trade",
 ];
 
 /// Registry of available tools.
@@ -568,6 +570,26 @@ impl ToolRegistry {
             base_dir,
         )));
         tracing::debug!("Registered 1 vision tool (analyze)");
+    }
+
+    /// Register HyperLiquid trading tools.
+    ///
+    /// Always registers `hyperliquid_analyze` (read-only market data, no key needed).
+    /// Registers `hyperliquid_trade` only when `HYPERLIQUID_PRIVATE_KEY` is set in the
+    /// environment; silently skips it otherwise.
+    pub fn register_hyperliquid_tools(&self) {
+        use crate::tools::builtin::{HyperliquidAnalyzeTool, HyperliquidTradeTool};
+        self.register_sync(Arc::new(HyperliquidAnalyzeTool::new()));
+        if let Ok(pk) = std::env::var("HYPERLIQUID_PRIVATE_KEY") {
+            let vault = std::env::var("HYPERLIQUID_VAULT_ADDRESS").ok();
+            self.register_sync(Arc::new(HyperliquidTradeTool::new(pk, vault)));
+            tracing::debug!("Registered HyperLiquid trading tools (analyze + trade)");
+        } else {
+            tracing::debug!(
+                "Registered HyperLiquid analyze tool only \
+                (set HYPERLIQUID_PRIVATE_KEY to also enable the trade tool)"
+            );
+        }
     }
 
     /// Register the software builder tool.

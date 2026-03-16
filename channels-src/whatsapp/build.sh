@@ -29,7 +29,7 @@ WASM_PATH="target/wasm32-wasip2/release/whatsapp_channel.wasm"
 
 if [ -f "$WASM_PATH" ]; then
     # Create component if needed
-    wasm-tools component new "$WASM_PATH" -o whatsapp.wasm 2>/dev/null || cp "$WASM_PATH" whatsapp.wasm
+    wasm-tools component new "$WASM_PATH" -o whatsapp.wasm 2>/dev/null || { cp "$WASM_PATH" whatsapp.wasm 2>/dev/null || powershell -Command "Copy-Item -Path '$WASM_PATH' -Destination 'whatsapp.wasm'"; }
 
     # Optimize the component
     wasm-tools strip whatsapp.wasm -o whatsapp.wasm

@@ -359,6 +359,9 @@ impl AppBuilder {
             }
         }
 
+        // Register HyperLiquid trading tools (analyze always, trade if key set)
+        tools.register_hyperliquid_tools();
+
         // Register builder tool if enabled
         if self.config.builder.enabled
             && (self.config.agent.allow_local_tools || !self.config.sandbox.enabled)

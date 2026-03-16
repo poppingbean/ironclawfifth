@@ -24,7 +24,7 @@ WASM_PATH="target/wasm32-wasip2/release/feishu_channel.wasm"
 
 if [ -f "$WASM_PATH" ]; then
     # Create component if needed
-    wasm-tools component new "$WASM_PATH" -o feishu.wasm 2>/dev/null || cp "$WASM_PATH" feishu.wasm
+    wasm-tools component new "$WASM_PATH" -o feishu.wasm 2>/dev/null || { cp "$WASM_PATH" feishu.wasm 2>/dev/null || powershell -Command "Copy-Item -Path '$WASM_PATH' -Destination 'feishu.wasm'"; }
 
     # Optimize the component
     wasm-tools strip feishu.wasm -o feishu.wasm

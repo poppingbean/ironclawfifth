@@ -42,11 +42,13 @@ pub use skill_tools::{SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSea
 pub use time::TimeTool;
 pub use tool_info::ToolInfoTool;
 mod html_converter;
+pub mod hyperliquid;
 pub mod image_analyze;
 pub mod image_edit;
 pub mod image_gen;
 
 pub use html_converter::convert_html_to_markdown;
+pub use hyperliquid::{HyperliquidAnalyzeTool, HyperliquidTradeTool};
 pub use image_analyze::ImageAnalyzeTool;
 pub use image_edit::ImageEditTool;
 pub use image_gen::ImageGenerateTool;
