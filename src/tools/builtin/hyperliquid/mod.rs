@@ -22,14 +22,61 @@ mod trading;
 pub use analysis::HyperliquidAnalyzeTool;
 pub use trading::HyperliquidTradeTool;
 
-/// Seed the HyperLiquid 15-minute trading routine if it does not already exist.
+/// Cancel any active (non-terminal) jobs linked to previous runs of a routine.
 ///
-/// Creates a `full_job` cron routine named `"hyperliquid-btc-15m"` that fires at
-/// second 15 of every 15th minute (`15 */15 * * * *`). Only seeded when
-/// `HYPERLIQUID_PRIVATE_KEY` is present — if the trade tool isn't registered,
-/// the routine would only be able to analyze but never place orders.
+/// Called at startup before rescheduling so stale `Pending`/`InProgress`/`Stuck`
+/// jobs from the previous process lifetime are cleaned up.
+async fn cancel_active_routine_jobs(
+    store: &std::sync::Arc<dyn crate::db::Database>,
+    routine_id: uuid::Uuid,
+) {
+    use crate::context::JobState;
+
+    let runs = match store.list_routine_runs(routine_id, 50).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("Failed to list runs for routine {}: {}", routine_id, e);
+            return;
+        }
+    };
+
+    for run in runs {
+        let Some(job_id) = run.job_id else { continue };
+
+        let ctx = match store.get_job(job_id).await {
+            Ok(Some(c)) => c,
+            Ok(None) => continue,
+            Err(e) => {
+                tracing::warn!("Failed to fetch job {}: {}", job_id, e);
+                continue;
+            }
+        };
+
+        if !ctx.state.is_active() {
+            continue; // already terminal — nothing to do
+        }
+
+        if let Err(e) = store
+            .update_job_status(job_id, JobState::Cancelled, Some("routine rescheduled at startup"))
+            .await
+        {
+            tracing::warn!("Failed to cancel stale routine job {}: {}", job_id, e);
+        } else {
+            tracing::debug!("Cancelled stale routine job {}", job_id);
+        }
+    }
+}
+
+/// Seed (or reschedule) the HyperLiquid 15-minute trading routine at startup.
 ///
-/// Idempotent: if the routine already exists, this is a no-op.
+/// - **First run**: creates a `full_job` cron routine named `"hyperliquid-btc-15m"`
+///   that fires at second 15 of every 15th minute (`15 */15 * * * *`).
+/// - **Subsequent startups**: cancels any active jobs from previous runs, then
+///   updates `next_fire_at` to the next future fire time so the ticker picks it
+///   up immediately without waiting for a stale past timestamp.
+///
+/// Only active when `HYPERLIQUID_PRIVATE_KEY` is set — if the trade tool isn't
+/// registered the routine would only be able to analyze, never place orders.
 pub async fn seed_hyperliquid_routine(store: &std::sync::Arc<dyn crate::db::Database>) {
     if std::env::var("HYPERLIQUID_PRIVATE_KEY").is_err() {
         return;
@@ -37,18 +84,9 @@ pub async fn seed_hyperliquid_routine(store: &std::sync::Arc<dyn crate::db::Data
 
     const ROUTINE_NAME: &str = "hyperliquid-btc-15m";
     const USER_ID: &str = "default";
+    const SCHEDULE: &str = "15 */15 * * * *";
 
-    match store.get_routine_by_name(USER_ID, ROUTINE_NAME).await {
-        Ok(Some(_)) => return, // already exists
-        Err(e) => {
-            tracing::warn!("Failed to check for HyperLiquid routine: {}", e);
-            return;
-        }
-        Ok(None) => {} // proceed to create
-    }
-
-    let schedule = "15 */15 * * * *";
-    let next_fire = match crate::agent::routine::next_cron_fire(schedule, None) {
+    let next_fire = match crate::agent::routine::next_cron_fire(SCHEDULE, None) {
         Ok(t) => t,
         Err(e) => {
             tracing::warn!("Failed to compute next fire for HyperLiquid routine: {}", e);
@@ -56,56 +94,82 @@ pub async fn seed_hyperliquid_routine(store: &std::sync::Arc<dyn crate::db::Data
         }
     };
 
-    let routine = crate::agent::routine::Routine {
-        id: uuid::Uuid::new_v4(),
-        name: ROUTINE_NAME.to_string(),
-        description: "Analyze BTC perpetuals and place a trade if signal is clear (every 15 min at T+15s)".to_string(),
-        user_id: USER_ID.to_string(),
-        enabled: true,
-        trigger: crate::agent::routine::Trigger::Cron {
-            schedule: schedule.to_string(),
-            timezone: None,
-        },
-        action: crate::agent::routine::RoutineAction::FullJob {
-            title: "HyperLiquid BTC 15m trade".to_string(),
-            description: "Run hyperliquid_analyze. If signal is LONG or SHORT (not NEUTRAL), \
-                verify sl_pct_leveraged ≤ 0.40 and rr_ratio ≥ 1.2, then call hyperliquid_trade \
-                with is_buy, price (limit_entry), take_profit, stop_loss, and leverage from the \
-                analysis output. Do not trade on NEUTRAL signals."
-                .to_string(),
-            max_iterations: 10,
-            tool_permissions: vec![
-                "hyperliquid_analyze".to_string(),
-                "hyperliquid_trade".to_string(),
-            ],
-        },
-        guardrails: crate::agent::routine::RoutineGuardrails {
-            cooldown: std::time::Duration::from_secs(600), // 10 min cooldown between fires
-            max_concurrent: 1,
-            dedup_window: None,
-        },
-        notify: crate::agent::routine::NotifyConfig {
-            channel: None,
-            user: USER_ID.to_string(),
-            on_attention: true,
-            on_failure: true,
-            on_success: false,
-        },
-        last_run_at: None,
-        next_fire_at: next_fire,
-        run_count: 0,
-        consecutive_failures: 0,
-        state: serde_json::json!({}),
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
-    };
+    match store.get_routine_by_name(USER_ID, ROUTINE_NAME).await {
+        Ok(Some(existing)) => {
+            // Cancel stale jobs from the previous process lifetime.
+            cancel_active_routine_jobs(store, existing.id).await;
 
-    match store.create_routine(&routine).await {
-        Ok(()) => tracing::info!(
-            "Seeded HyperLiquid routine '{}' (next fire: {:?})",
-            ROUTINE_NAME,
-            routine.next_fire_at
-        ),
-        Err(e) => tracing::warn!("Failed to seed HyperLiquid routine: {}", e),
+            // Reschedule: bump next_fire_at to the next future slot.
+            let mut updated = existing;
+            updated.next_fire_at = next_fire;
+            updated.updated_at = chrono::Utc::now();
+
+            match store.update_routine(&updated).await {
+                Ok(()) => tracing::info!(
+                    "Rescheduled HyperLiquid routine '{}' (next fire: {:?})",
+                    ROUTINE_NAME,
+                    updated.next_fire_at
+                ),
+                Err(e) => tracing::warn!("Failed to reschedule HyperLiquid routine: {}", e),
+            }
+        }
+        Ok(None) => {
+            // First run — create the routine.
+            let routine = crate::agent::routine::Routine {
+                id: uuid::Uuid::new_v4(),
+                name: ROUTINE_NAME.to_string(),
+                description: "Analyze BTC perpetuals and place a trade if signal is clear (every 15 min at T+15s)".to_string(),
+                user_id: USER_ID.to_string(),
+                enabled: true,
+                trigger: crate::agent::routine::Trigger::Cron {
+                    schedule: SCHEDULE.to_string(),
+                    timezone: None,
+                },
+                action: crate::agent::routine::RoutineAction::FullJob {
+                    title: "HyperLiquid BTC 15m trade".to_string(),
+                    description: "Run hyperliquid_analyze. If signal is LONG or SHORT (not NEUTRAL), \
+                        verify sl_pct_leveraged ≤ 0.40 and rr_ratio ≥ 1.2, then call hyperliquid_trade \
+                        with is_buy, price (limit_entry), take_profit, stop_loss, and leverage from the \
+                        analysis output. Do not trade on NEUTRAL signals."
+                        .to_string(),
+                    max_iterations: 10,
+                    tool_permissions: vec![
+                        "hyperliquid_analyze".to_string(),
+                        "hyperliquid_trade".to_string(),
+                    ],
+                },
+                guardrails: crate::agent::routine::RoutineGuardrails {
+                    cooldown: std::time::Duration::from_secs(600),
+                    max_concurrent: 1,
+                    dedup_window: None,
+                },
+                notify: crate::agent::routine::NotifyConfig {
+                    channel: None,
+                    user: USER_ID.to_string(),
+                    on_attention: true,
+                    on_failure: true,
+                    on_success: false,
+                },
+                last_run_at: None,
+                next_fire_at: next_fire,
+                run_count: 0,
+                consecutive_failures: 0,
+                state: serde_json::json!({}),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            };
+
+            match store.create_routine(&routine).await {
+                Ok(()) => tracing::info!(
+                    "Seeded HyperLiquid routine '{}' (next fire: {:?})",
+                    ROUTINE_NAME,
+                    routine.next_fire_at
+                ),
+                Err(e) => tracing::warn!("Failed to seed HyperLiquid routine: {}", e),
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Failed to check for HyperLiquid routine: {}", e);
+        }
     }
 }
