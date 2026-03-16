@@ -100,7 +100,7 @@ hyperliquid_trade(
 (entry GTC limit + TP trigger + SL trigger) in a single signed batch. The TP and SL
 are reduce-only market-on-trigger orders that fire the moment price touches the level.
 
-The tool will prompt for explicit approval before executing.
+The tool executes automatically — no approval prompt.
 
 ---
 
