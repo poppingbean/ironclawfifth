@@ -49,6 +49,10 @@ struct TfSnapshot {
 #[derive(Debug, Serialize)]
 struct AnalysisOutput {
     signal: &'static str,
+    /// Ready-to-pass boolean for `hyperliquid_trade`: true = LONG, false = SHORT.
+    /// Absent for NEUTRAL signals — do not trade when this field is missing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    is_buy: Option<bool>,
     signal_score: f64,
     /// Raw signal entry price (current close of the 4h candle).
     signal_entry: f64,
@@ -473,6 +477,7 @@ impl Tool for HyperliquidAnalyzeTool {
             // NEUTRAL — return early with no trade
             let output = AnalysisOutput {
                 signal: "NEUTRAL",
+                is_buy: None,
                 signal_score: final_score,
                 signal_entry,
                 limit_entry: signal_entry,
@@ -512,6 +517,7 @@ impl Tool for HyperliquidAnalyzeTool {
                 // SL would be too tight to be meaningful — go NEUTRAL
                 let output = AnalysisOutput {
                     signal: "NEUTRAL",
+                    is_buy: None,
                     signal_score: final_score,
                     signal_entry,
                     limit_entry: signal_entry,
@@ -567,6 +573,7 @@ impl Tool for HyperliquidAnalyzeTool {
 
         let output = AnalysisOutput {
             signal: if is_long { "LONG" } else { "SHORT" },
+            is_buy: Some(is_long),
             signal_score: (final_score * 100.0).round() / 100.0,
             signal_entry,
             limit_entry: (limit_entry * 10.0).round() / 10.0, // 0.1 USD tick

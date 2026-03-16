@@ -127,10 +127,14 @@ pub async fn seed_hyperliquid_routine(store: &std::sync::Arc<dyn crate::db::Data
                 },
                 action: crate::agent::routine::RoutineAction::FullJob {
                     title: "HyperLiquid BTC 15m trade".to_string(),
-                    description: "Run hyperliquid_analyze. If signal is LONG or SHORT (not NEUTRAL), \
-                        verify sl_pct_leveraged ≤ 0.40 and rr_ratio ≥ 1.2, then call hyperliquid_trade \
-                        with is_buy, price (limit_entry), take_profit, stop_loss, and leverage from the \
-                        analysis output. Do not trade on NEUTRAL signals."
+                    description: "Call hyperliquid_analyze (no parameters). \
+                        If the result contains is_buy (i.e. signal is LONG or SHORT, not NEUTRAL) \
+                        AND sl_pct_leveraged ≤ 0.40 AND rr_ratio ≥ 1.2, call hyperliquid_trade \
+                        with exactly these fields from the analysis output: \
+                        is_buy (boolean field from analysis), \
+                        price (use limit_entry), \
+                        take_profit, stop_loss, leverage. \
+                        Do NOT trade when signal is NEUTRAL or is_buy is absent."
                         .to_string(),
                     max_iterations: 10,
                     tool_permissions: vec![

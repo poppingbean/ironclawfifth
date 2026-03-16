@@ -647,7 +647,14 @@ impl Tool for HyperliquidTradeTool {
         // ── Parameter extraction ──────────────────────────────────────────────
         let is_buy = params
             .get("is_buy")
-            .and_then(|v| v.as_bool())
+            .and_then(|v| {
+                // Accept both JSON boolean and string "true"/"false" for robustness.
+                v.as_bool().or_else(|| match v.as_str() {
+                    Some("true") => Some(true),
+                    Some("false") => Some(false),
+                    _ => None,
+                })
+            })
             .ok_or_else(|| {
                 ToolError::InvalidParameters("Missing required 'is_buy' parameter".to_string())
             })?;
