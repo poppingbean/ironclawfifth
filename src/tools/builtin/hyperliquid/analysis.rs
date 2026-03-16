@@ -1,5 +1,5 @@
-//! HyperLiquid analysis tool — fetches BTCUSDT multi-timeframe OHLCV from
-//! Binance Futures and runs 14 technical indicators to produce a trading signal.
+//! HyperLiquid analysis tool — fetches BTC multi-timeframe OHLCV from the
+//! HyperLiquid exchange and runs 14 technical indicators to produce a trading signal.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -16,11 +16,11 @@ use super::indicators::{self, Candle, IndicatorSet};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const BINANCE_KLINES: &str = "https://fapi.binance.com/fapi/v1/klines";
-const SYMBOL: &str = "BTCUSDT";
+const HL_INFO_URL: &str = "https://api.hyperliquid.xyz/info";
+const COIN: &str = "BTC";
 const CANDLE_LIMIT: u32 = 500;
 
-/// Timeframe identifiers matching Binance interval strings.
+/// Timeframe identifiers matching HyperLiquid interval strings.
 #[derive(Debug, Clone, Copy)]
 enum Tf {
     M15,
@@ -34,6 +34,15 @@ impl Tf {
             Self::M15 => "15m",
             Self::H1 => "1h",
             Self::H4 => "4h",
+        }
+    }
+
+    /// Duration of one candle in milliseconds — used to compute startTime.
+    fn candle_ms(self) -> u64 {
+        match self {
+            Self::M15 => 15 * 60 * 1_000,
+            Self::H1 => 60 * 60 * 1_000,
+            Self::H4 => 4 * 60 * 60 * 1_000,
         }
     }
 }
@@ -85,7 +94,7 @@ struct TimeframeScores {
 
 // ── Tool struct ───────────────────────────────────────────────────────────────
 
-/// Fetches BTCUSDT OHLCV from Binance Futures and produces a trading signal
+/// Fetches BTC OHLCV from the HyperLiquid exchange and produces a trading signal
 /// using 14 technical indicators across 15m / 1h / 4h timeframes.
 ///
 /// When a `Workspace` is provided, each signal is appended to
@@ -116,62 +125,72 @@ impl Default for HyperliquidAnalyzeTool {
     }
 }
 
-// ── Binance fetch ─────────────────────────────────────────────────────────────
+// ── HyperLiquid candle fetch ───────────────────────────────────────────────────
 
-/// Fetch candles from Binance Futures klines endpoint.
+/// Fetch candles from the HyperLiquid candleSnapshot endpoint.
+///
+/// POST /info with `{"type":"candleSnapshot","req":{"coin":"BTC","interval":"15m",
+/// "startTime":<ms>,"endTime":<ms>}}`.
+/// Each candle in the response is an object: `{t, T, s, i, o, h, l, c, v, n}`.
 async fn fetch_candles(
     client: &reqwest::Client,
     tf: Tf,
 ) -> Result<Vec<Candle>, ToolError> {
-    let url = format!(
-        "{}?symbol={}&interval={}&limit={}",
-        BINANCE_KLINES,
-        SYMBOL,
-        tf.as_str(),
-        CANDLE_LIMIT,
-    );
+    let now_ms = Utc::now().timestamp_millis() as u64;
+    let start_ms = now_ms.saturating_sub(tf.candle_ms() * CANDLE_LIMIT as u64);
+
+    let payload = serde_json::json!({
+        "type": "candleSnapshot",
+        "req": {
+            "coin": COIN,
+            "interval": tf.as_str(),
+            "startTime": start_ms,
+            "endTime": now_ms
+        }
+    });
 
     let resp = client
-        .get(&url)
+        .post(HL_INFO_URL)
+        .header("Content-Type", "application/json")
+        .json(&payload)
         .send()
         .await
-        .map_err(|e| ToolError::ExternalService(format!("Binance request failed ({tf:?}): {e}")))?;
+        .map_err(|e| ToolError::ExternalService(format!("HyperLiquid request failed ({tf:?}): {e}")))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         return Err(ToolError::ExternalService(format!(
-            "Binance returned {status} for {tf:?}: {body}"
+            "HyperLiquid returned {status} for {tf:?}: {body}"
         )));
     }
 
-    // Binance klines: each element is an array
-    // [0]=open_time [1]=open [2]=high [3]=low [4]=close [5]=volume ...
+    // HyperLiquid candleSnapshot response: array of objects
+    // {"t":<open_ms>,"T":<close_ms>,"s":"BTC","i":"15m","o":"...","h":"...","l":"...","c":"...","v":"...","n":<trades>}
     let raw: Vec<serde_json::Value> = resp
         .json()
         .await
-        .map_err(|e| ToolError::ExternalService(format!("Binance parse error ({tf:?}): {e}")))?;
+        .map_err(|e| ToolError::ExternalService(format!("HyperLiquid parse error ({tf:?}): {e}")))?;
 
     let candles: Vec<Candle> = raw
         .iter()
         .filter_map(|row| {
-            let arr = row.as_array()?;
-            let parse = |i: usize| -> Option<f64> {
-                arr.get(i)?.as_str()?.parse().ok()
+            let parse = |key: &str| -> Option<f64> {
+                row.get(key)?.as_str()?.parse().ok()
             };
             Some(Candle {
-                open: parse(1)?,
-                high: parse(2)?,
-                low: parse(3)?,
-                close: parse(4)?,
-                volume: parse(5)?,
+                open: parse("o")?,
+                high: parse("h")?,
+                low: parse("l")?,
+                close: parse("c")?,
+                volume: parse("v")?,
             })
         })
         .collect();
 
     if candles.is_empty() {
         return Err(ToolError::ExternalService(format!(
-            "Binance returned empty klines for {tf:?}"
+            "HyperLiquid returned empty candles for {tf:?}"
         )));
     }
     Ok(candles)
@@ -387,13 +406,13 @@ impl Tool for HyperliquidAnalyzeTool {
     }
 
     fn description(&self) -> &str {
-        "Fetches BTCUSDT multi-timeframe OHLCV from Binance Futures (15m, 1h, 4h), \
+        "Fetches BTC multi-timeframe OHLCV from the HyperLiquid exchange (15m, 1h, 4h), \
         computes 14 technical indicators per timeframe (RSI, MACD, Bollinger Bands, \
         EMA50/200, ATR, Stochastic, Williams %R, CCI, ADX, OBV, VWAP, Ichimoku, \
         Fibonacci retracements), and returns a LONG/SHORT/NEUTRAL signal with \
         entry price, take-profit, stop-loss, and leverage recommendation (×50/×75/×100). \
         4h timeframe drives trend direction (weighted ×0.45); 1h ATR sizes the SL/TP. \
-        No parameters required — always analyzes BTCUSDT."
+        No parameters required — always analyzes BTC perpetual."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

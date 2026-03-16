@@ -46,8 +46,8 @@ HyperLiquid. Always run analysis before placing an order. Never skip signal revi
 hyperliquid_analyze
 ```
 
-No parameters required. Fetches 500 candles on 15m, 1h, and 4h from Binance Futures
-and returns a full signal with indicator breakdown.
+No parameters required. Fetches 500 candles on 15m, 1h, and 4h from the HyperLiquid
+exchange and returns a full signal with indicator breakdown.
 
 - **4h timeframe** drives trend direction (weighted ×0.45 in the multi-timeframe score)
 - **1h ATR** sizes the SL and TP for tighter, more responsive risk levels
