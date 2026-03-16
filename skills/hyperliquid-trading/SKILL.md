@@ -55,19 +55,25 @@ and returns a full signal with indicator breakdown.
 
 ### Step 2 — Review the Signal
 
-Check these fields before proceeding:
+`hyperliquid_analyze` returns a JSON object. **Read all fields directly from that result — do NOT use the `json` tool to parse or query it.**
+
+Top-level fields you need:
 
 | Field              | Description                                              |
 |--------------------|----------------------------------------------------------|
-| `signal`           | LONG / SHORT / NEUTRAL                                   |
+| `signal`           | `"LONG"` / `"SHORT"` / `"NEUTRAL"`                      |
+| `is_buy`           | `true` (LONG) or `false` (SHORT) — pass this directly to `hyperliquid_trade` |
 | `signal_score`     | 0–100; ≥60 = LONG, ≤40 = SHORT, 41–59 = NEUTRAL         |
+| `limit_entry`      | Limit price to pass as `price` in `hyperliquid_trade`    |
+| `take_profit`      | TP price to pass as `take_profit` in `hyperliquid_trade` |
+| `stop_loss`        | SL price to pass as `stop_loss` in `hyperliquid_trade`   |
 | `leverage`         | ×50 (dist 10–19), ×75 (dist 20–29), ×100 (dist ≥ 30)   |
 | `sl_pct_leveraged` | % of margin at risk — must be ≤ 0.40 (40%)              |
 | `rr_ratio`         | TP:SL ratio — must be ≥ 1.2                              |
 | `atr_1h`           | 1h ATR used for SL/TP sizing                             |
 | `atr_4h`           | 4h ATR — trend context only                              |
 
-**Do not trade when `signal = NEUTRAL`.**
+**Do not trade when `signal = "NEUTRAL"` (i.e. `is_buy` is null).**
 
 ### Step 3 — Position Size (auto-calculated)
 
@@ -86,15 +92,19 @@ To override, pass an explicit `size` in BTC.
 
 ### Step 4 — Place the Order
 
+Use the values read directly from the `hyperliquid_analyze` result. Example (LONG signal):
+
 ```
 hyperliquid_trade(
-  is_buy      = true          # or false for SHORT
-  price       = limit_entry   # from analysis output
-  take_profit = take_profit   # from analysis output — required
-  stop_loss   = stop_loss     # from analysis output — required
-  leverage    = 75            # from analysis output
+  is_buy      = <is_buy from analysis>        # true for LONG, false for SHORT
+  price       = <limit_entry from analysis>   # already buffered 0.4% from signal entry
+  take_profit = <take_profit from analysis>   # required
+  stop_loss   = <stop_loss from analysis>     # required
+  leverage    = <leverage from analysis>      # 25 / 50 / 75 / 100
 )
 ```
+
+Do NOT use the `json` tool at any point in this workflow.
 
 `take_profit` and `stop_loss` are **required**. The tool submits all three orders
 (entry GTC limit + TP trigger + SL trigger) in a single signed batch. The TP and SL
