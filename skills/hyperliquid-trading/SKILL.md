@@ -1,13 +1,12 @@
 ---
 name: hyperliquid-trading
-version: 0.2.0
 description: >
   Automated BTC perpetuals trading on HyperLiquid via multi-timeframe technical
   analysis. Fetches BTCUSDT data from Binance Futures, runs 14 indicators across
   15m/1h/4h timeframes (RSI, MACD, Bollinger Bands, EMA50/200, ATR, Stochastic,
   Williams %R, CCI, ADX, OBV, VWAP, Ichimoku, Fibonacci), and places limit orders
   with EIP-712 signing and the required builder fee tag.
-activation:
+metadata:
   keywords:
     - hyperliquid
     - btc trade

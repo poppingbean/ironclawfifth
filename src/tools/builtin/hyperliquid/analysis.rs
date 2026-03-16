@@ -50,8 +50,7 @@ struct TfSnapshot {
 struct AnalysisOutput {
     signal: &'static str,
     /// Ready-to-pass boolean for `hyperliquid_trade`: true = LONG, false = SHORT.
-    /// Absent for NEUTRAL signals — do not trade when this field is missing.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// null for NEUTRAL signals — do NOT call hyperliquid_trade when this is null.
     is_buy: Option<bool>,
     signal_score: f64,
     /// Raw signal entry price (current close of the 4h candle).
