@@ -77,6 +77,7 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "image_analyze",
     "tool_info",
     "hyperliquid_analyze",
+    "hyperliquid_balance",
     "hyperliquid_trade",
 ];
 
@@ -575,19 +576,32 @@ impl ToolRegistry {
     /// Register HyperLiquid trading tools.
     ///
     /// Always registers `hyperliquid_analyze` (read-only market data, no key needed).
-    /// Registers `hyperliquid_trade` only when `HYPERLIQUID_PRIVATE_KEY` is set in the
-    /// environment; silently skips it otherwise.
-    pub fn register_hyperliquid_tools(&self) {
-        use crate::tools::builtin::{HyperliquidAnalyzeTool, HyperliquidTradeTool};
-        self.register_sync(Arc::new(HyperliquidAnalyzeTool::new()));
+    /// Registers `hyperliquid_balance` and `hyperliquid_trade` only when
+    /// `HYPERLIQUID_PRIVATE_KEY` is set; silently skips them otherwise.
+    ///
+    /// When `workspace` is `Some`, each analysis signal is appended to
+    /// `hyperliquid/signal-history.md` in the workspace.
+    pub fn register_hyperliquid_tools(&self, workspace: Option<Arc<Workspace>>) {
+        use crate::tools::builtin::{
+            HyperliquidAnalyzeTool, HyperliquidBalanceTool, HyperliquidTradeTool,
+        };
+        let mut analyze = HyperliquidAnalyzeTool::new();
+        if let Some(ws) = workspace {
+            analyze = analyze.with_workspace(ws);
+        }
+        self.register_sync(Arc::new(analyze));
         if let Ok(pk) = std::env::var("HYPERLIQUID_PRIVATE_KEY") {
             let vault = std::env::var("HYPERLIQUID_VAULT_ADDRESS").ok();
+            self.register_sync(Arc::new(HyperliquidBalanceTool::new(
+                pk.clone(),
+                vault.clone(),
+            )));
             self.register_sync(Arc::new(HyperliquidTradeTool::new(pk, vault)));
-            tracing::debug!("Registered HyperLiquid trading tools (analyze + trade)");
+            tracing::debug!("Registered HyperLiquid tools (analyze + balance + trade)");
         } else {
             tracing::debug!(
                 "Registered HyperLiquid analyze tool only \
-                (set HYPERLIQUID_PRIVATE_KEY to also enable the trade tool)"
+                (set HYPERLIQUID_PRIVATE_KEY to also enable balance and trade tools)"
             );
         }
     }

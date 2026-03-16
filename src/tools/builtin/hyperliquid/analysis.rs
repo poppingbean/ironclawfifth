@@ -1,6 +1,7 @@
 //! HyperLiquid analysis tool — fetches BTCUSDT multi-timeframe OHLCV from
 //! Binance Futures and runs 14 technical indicators to produce a trading signal.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -9,6 +10,7 @@ use serde::Serialize;
 
 use crate::context::JobContext;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, ToolRateLimitConfig};
+use crate::workspace::Workspace;
 
 use super::indicators::{self, Candle, IndicatorSet};
 
@@ -82,8 +84,12 @@ struct TimeframeScores {
 
 /// Fetches BTCUSDT OHLCV from Binance Futures and produces a trading signal
 /// using 14 technical indicators across 15m / 1h / 4h timeframes.
+///
+/// When a `Workspace` is provided, each signal is appended to
+/// `hyperliquid/signal-history.md` for historical review.
 pub struct HyperliquidAnalyzeTool {
     client: reqwest::Client,
+    workspace: Option<Arc<Workspace>>,
 }
 
 impl HyperliquidAnalyzeTool {
@@ -92,7 +98,12 @@ impl HyperliquidAnalyzeTool {
             .timeout(Duration::from_secs(30))
             .build()
             .unwrap_or_default();
-        Self { client }
+        Self { client, workspace: None }
+    }
+
+    pub fn with_workspace(mut self, workspace: Arc<Workspace>) -> Self {
+        self.workspace = Some(workspace);
+        self
     }
 }
 
@@ -575,12 +586,45 @@ impl Tool for HyperliquidAnalyzeTool {
             neutral_reason,
         };
 
-        Ok(ToolOutput::success(
-            serde_json::to_value(output).map_err(|e| {
-                ToolError::ExecutionFailed(format!("Failed to serialize analysis: {e}"))
-            })?,
-            start.elapsed(),
-        ))
+        let output_value = serde_json::to_value(&output).map_err(|e| {
+            ToolError::ExecutionFailed(format!("Failed to serialize analysis: {e}"))
+        })?;
+
+        // Append signal to workspace history file (fire-and-forget).
+        if let Some(ref ws) = self.workspace {
+            let entry = format!(
+                "\n## {}\n\
+                - **Signal**: {} (score {:.1})\n\
+                - **Entry**: ${:.1}  |  Limit: ${:.1}\n\
+                - **TP**: ${:.1}  |  **SL**: ${:.1}\n\
+                - **Leverage**: ×{}  |  RR: {:.2}  |  SL%: {:.1}%\n\
+                - **ATR 1h**: ${:.1}  |  **ATR 4h**: ${:.1}\n\
+                - **Scores** — 15m: {:.1}  1h: {:.1}  4h: {:.1}\n",
+                output.computed_at,
+                output.signal,
+                output.signal_score,
+                output.signal_entry,
+                output.limit_entry,
+                output.take_profit,
+                output.stop_loss,
+                output.leverage,
+                output.rr_ratio,
+                output.sl_pct_leveraged * 100.0,
+                output.atr_1h,
+                output.atr_4h,
+                output.timeframes.m15.score,
+                output.timeframes.h1.score,
+                output.timeframes.h4.score,
+            );
+            let ws = Arc::clone(ws);
+            tokio::spawn(async move {
+                if let Err(e) = ws.append("hyperliquid/signal-history.md", &entry).await {
+                    tracing::warn!("Failed to write HyperLiquid signal history: {}", e);
+                }
+            });
+        }
+
+        Ok(ToolOutput::success(output_value, start.elapsed()))
     }
 }
 

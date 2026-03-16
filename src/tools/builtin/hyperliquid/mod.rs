@@ -20,7 +20,7 @@ pub mod indicators;
 mod trading;
 
 pub use analysis::HyperliquidAnalyzeTool;
-pub use trading::HyperliquidTradeTool;
+pub use trading::{HyperliquidBalanceTool, HyperliquidTradeTool};
 
 /// Cancel any active (non-terminal) jobs linked to previous runs of a routine.
 ///

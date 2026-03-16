@@ -312,6 +312,209 @@ fn allocation_pct_for_leverage(leverage: u32) -> f64 {
     }
 }
 
+// ── Balance tool ─────────────────────────────────────────────────────────────
+
+/// Returns the HyperLiquid account balance, margin summary, and open positions.
+///
+/// Requires `HYPERLIQUID_PRIVATE_KEY` at construction time. The wallet address is
+/// derived from the private key unless `HYPERLIQUID_VAULT_ADDRESS` is set (agent
+/// wallet), in which case that address is queried instead.
+pub struct HyperliquidBalanceTool {
+    private_key: SecretString,
+    vault_address: Option<[u8; 20]>,
+    client: reqwest::Client,
+}
+
+impl HyperliquidBalanceTool {
+    pub fn new(private_key: String, vault_address: Option<String>) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap_or_default();
+        let vault_bytes = vault_address.and_then(|addr| {
+            let hex = addr.strip_prefix("0x").unwrap_or(&addr).to_string();
+            let bytes = hex::decode(&hex).ok()?;
+            if bytes.len() == 20 {
+                let mut arr = [0u8; 20];
+                arr.copy_from_slice(&bytes);
+                Some(arr)
+            } else {
+                None
+            }
+        });
+        Self {
+            private_key: SecretString::from(private_key),
+            vault_address: vault_bytes,
+            client,
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for HyperliquidBalanceTool {
+    fn name(&self) -> &str {
+        "hyperliquid_balance"
+    }
+
+    fn description(&self) -> &str {
+        "Returns your HyperLiquid account balance, margin summary, and open perpetual \
+        positions. Shows account equity, available margin, total margin used, \
+        unrealized PnL, and a list of current positions with size, entry price, \
+        and unrealized PnL per position."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object", "properties": {} })
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::Never
+    }
+
+    fn requires_sanitization(&self) -> bool {
+        true
+    }
+
+    fn rate_limit_config(&self) -> Option<ToolRateLimitConfig> {
+        Some(ToolRateLimitConfig::new(20, 200))
+    }
+
+    fn execution_timeout(&self) -> Duration {
+        Duration::from_secs(30)
+    }
+
+    async fn execute(
+        &self,
+        _params: serde_json::Value,
+        _ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = Instant::now();
+
+        // Resolve the address to query
+        let address = if let Some(vault) = self.vault_address {
+            format!("0x{}", hex::encode(vault))
+        } else {
+            let signing_key = decode_private_key(self.private_key.expose_secret())?;
+            derive_eth_address(&signing_key)
+        };
+
+        // Fetch full clearinghouseState (superset of balance)
+        let payload = serde_json::json!({
+            "type": "clearinghouseState",
+            "user": address
+        });
+
+        let resp = self
+            .client
+            .post(HL_INFO_URL)
+            .header("Content-Type", "application/json")
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| {
+                ToolError::ExternalService(format!("HyperLiquid /info request failed: {e}"))
+            })?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ToolError::ExternalService(format!(
+                "HyperLiquid /info returned {status}: {body}"
+            )));
+        }
+
+        let state: serde_json::Value = resp.json().await.map_err(|e| {
+            ToolError::ExternalService(format!("Failed to parse HyperLiquid response: {e}"))
+        })?;
+
+        // Extract margin summary fields
+        let ms = state.get("marginSummary").cloned().unwrap_or_default();
+        let account_value: f64 = ms
+            .get("accountValue")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.0);
+        let total_margin_used: f64 = ms
+            .get("totalMarginUsed")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.0);
+        let total_ntl_pos: f64 = ms
+            .get("totalNtlPos")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.0);
+        let total_raw_usd: f64 = ms
+            .get("totalRawUsd")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.0);
+        let available_margin = account_value - total_margin_used;
+
+        // Extract open positions
+        let positions: Vec<serde_json::Value> = state
+            .get("assetPositions")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|p| {
+                        let pos = p.get("position")?;
+                        let szi: f64 = pos
+                            .get("szi")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(0.0);
+                        if szi == 0.0 {
+                            return None; // skip zero-size positions
+                        }
+                        let coin = pos
+                            .get("coin")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?")
+                            .to_string();
+                        let entry_px: f64 = pos
+                            .get("entryPx")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(0.0);
+                        let unrealized_pnl: f64 = pos
+                            .get("unrealizedPnl")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(0.0);
+                        let leverage = pos
+                            .get("leverage")
+                            .and_then(|l| l.get("value"))
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        Some(serde_json::json!({
+                            "coin": coin,
+                            "side": if szi > 0.0 { "LONG" } else { "SHORT" },
+                            "size": szi.abs(),
+                            "entry_price": entry_px,
+                            "leverage": leverage,
+                            "unrealized_pnl": unrealized_pnl
+                        }))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let result = serde_json::json!({
+            "address": address,
+            "account_equity_usd": account_value,
+            "available_margin_usd": available_margin,
+            "total_margin_used_usd": total_margin_used,
+            "total_position_notional_usd": total_ntl_pos,
+            "raw_usdc_balance_usd": total_raw_usd,
+            "open_positions": positions,
+            "queried_at": chrono::Utc::now().to_rfc3339()
+        });
+
+        Ok(ToolOutput::success(result, start.elapsed()))
+    }
+}
+
 // ── Tool struct ───────────────────────────────────────────────────────────────
 
 /// Places a GTC limit order with take-profit and stop-loss on HyperLiquid perpetuals.

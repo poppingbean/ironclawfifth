@@ -360,7 +360,7 @@ impl AppBuilder {
         }
 
         // Register HyperLiquid trading tools (analyze always, trade if key set)
-        tools.register_hyperliquid_tools();
+        tools.register_hyperliquid_tools(workspace.clone());
 
         // Register builder tool if enabled
         if self.config.builder.enabled
