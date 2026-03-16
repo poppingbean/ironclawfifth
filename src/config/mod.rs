@@ -356,6 +356,8 @@ pub async fn inject_llm_keys_from_secrets(
     let mut mappings: Vec<(&str, &str)> = vec![
         ("llm_nearai_api_key", "NEARAI_API_KEY"),
         ("llm_anthropic_oauth_token", "ANTHROPIC_OAUTH_TOKEN"),
+        ("hyperliquid_private_key", "HYPERLIQUID_PRIVATE_KEY"),
+        ("hyperliquid_vault_address", "HYPERLIQUID_VAULT_ADDRESS"),
     ];
 
     // Dynamically discover secret->env mappings from the provider registry.
