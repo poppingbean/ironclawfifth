@@ -44,10 +44,11 @@ Two cron routines run every 15 minutes:
 
 | Routine | Schedule | Tools | Purpose |
 |---------|----------|-------|---------|
-| `hyperliquid-btc-15m` | `:00/:15/:30/:45` (every 15 min) | `hyperliquid_analyze`, `memory_write` | Fetch signal, store to `btc/signal/latest` |
-| `hyperliquid-btc-trader` | `:03/:18/:33/:48` (T+3 min) | `memory_read`, `hyperliquid_balance`, `hyperliquid_trade` | Read signal, check positions, trade |
+| `hyperliquid-btc-15m` | T+15s (`:00:15`/`:15:15`/`:30:15`/`:45:15`) | `hyperliquid_analyze`, `memory_write` | Fetch signal, store to `btc/signal/latest` |
+| `hyperliquid-btc-trader` | T+3min15s (`:03:15`/`:18:15`/`:33:15`/`:48:15`) | `memory_read`, `hyperliquid_balance`, `hyperliquid_trade` | Read signal, check positions, trade |
 
-Routine 2 fires 3 minutes after Routine 1, giving analysis time to complete before trading decisions.
+Routine 1 fires 15 seconds after candle close to let the exchange settle.
+Routine 2 fires 3 minutes later, giving analysis time to complete before trading decisions.
 Both routines are created/synced automatically at startup from the latest context.
 
 ---
