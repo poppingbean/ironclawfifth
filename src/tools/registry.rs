@@ -583,11 +583,12 @@ impl ToolRegistry {
     /// `hyperliquid/signal-history.md` in the workspace.
     pub fn register_hyperliquid_tools(&self, workspace: Option<Arc<Workspace>>) {
         use crate::tools::builtin::{
-            HyperliquidAnalyzeTool, HyperliquidBalanceTool, HyperliquidTradeTool,
+            HyperliquidAnalyzeTool, HyperliquidBalanceTool, HyperliquidExecuteTool,
+            HyperliquidTradeTool,
         };
         let mut analyze = HyperliquidAnalyzeTool::new();
-        if let Some(ws) = workspace {
-            analyze = analyze.with_workspace(ws);
+        if let Some(ref ws) = workspace {
+            analyze = analyze.with_workspace(Arc::clone(ws));
         }
         self.register_sync(Arc::new(analyze));
         if let Ok(pk) = std::env::var("HYPERLIQUID_PRIVATE_KEY") {
@@ -596,12 +597,20 @@ impl ToolRegistry {
                 pk.clone(),
                 vault.clone(),
             )));
-            self.register_sync(Arc::new(HyperliquidTradeTool::new(pk, vault)));
-            tracing::debug!("Registered HyperLiquid tools (analyze + balance + trade)");
+            self.register_sync(Arc::new(HyperliquidTradeTool::new(
+                pk.clone(),
+                vault.clone(),
+            )));
+            if let Some(ws) = workspace {
+                self.register_sync(Arc::new(HyperliquidExecuteTool::new(
+                    pk, vault, ws,
+                )));
+            }
+            tracing::debug!("Registered HyperLiquid tools (analyze + balance + trade + execute)");
         } else {
             tracing::debug!(
                 "Registered HyperLiquid analyze tool only \
-                (set HYPERLIQUID_PRIVATE_KEY to also enable balance and trade tools)"
+                (set HYPERLIQUID_PRIVATE_KEY to also enable balance, trade, and execute tools)"
             );
         }
     }

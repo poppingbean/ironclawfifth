@@ -366,10 +366,10 @@ async fn fetch_hl_balance(client: &reqwest::Client, address: &str) -> Result<f64
 /// Return the fraction of account balance to allocate based on leverage tier.
 fn allocation_pct_for_leverage(leverage: u32) -> f64 {
     match leverage {
-        100 => 0.10,
-        75 => 0.15,
-        50 => 0.30,
-        _ => 0.50, // ×25 or unrecognised
+        40 => 0.20,
+        30 => 0.30,
+        20 => 0.40,
+        _ => 0.20, // unrecognised — conservative default
     }
 }
 
@@ -505,7 +505,7 @@ impl Tool for HyperliquidBalanceTool {
             .and_then(|v| v.as_str())
             .and_then(|s| s.parse().ok())
             .unwrap_or(0.0);
-        let total_raw_usd: f64 = ms
+        let _total_raw_usd: f64 = ms
             .get("totalRawUsd")
             .and_then(|v| v.as_str())
             .and_then(|s| s.parse().ok())
@@ -681,8 +681,8 @@ impl Tool for HyperliquidTradeTool {
                 },
                 "leverage": {
                     "type": "integer",
-                    "description": "Leverage tier from hyperliquid_analyze (25, 50, 75, or 100). Used to auto-calculate position size from account balance. Not required when reduce_only=true and size is provided.",
-                    "enum": [25, 50, 75, 100]
+                    "description": "Leverage tier from hyperliquid_analyze (20, 30, or 40). Used to auto-calculate position size from account balance. Not required when reduce_only=true and size is provided.",
+                    "enum": [20, 30, 40]
                 },
                 "size": {
                     "type": "number",
@@ -790,7 +790,7 @@ impl Tool for HyperliquidTradeTool {
                 .map(|v| v as u32)
                 .ok_or_else(|| {
                     ToolError::InvalidParameters(
-                        "Missing required 'leverage' parameter (25/50/75/100)".to_string(),
+                        "Missing required 'leverage' parameter (20/30/40)".to_string(),
                     )
                 })?
         };
@@ -806,18 +806,18 @@ impl Tool for HyperliquidTradeTool {
                 "Price {price} is out of the plausible BTC range (0, 10,000,000)"
             )));
         }
-        if take_profit <= 0.0 || take_profit > 10_000_000.0 {
-            return Err(ToolError::InvalidParameters(format!(
-                "take_profit {take_profit} is out of range"
-            )));
-        }
-        if stop_loss <= 0.0 || stop_loss > 10_000_000.0 {
-            return Err(ToolError::InvalidParameters(format!(
-                "stop_loss {stop_loss} is out of range"
-            )));
-        }
-        // Directional sanity (skipped for reduce_only close orders)
+        // TP/SL validation and directional sanity only apply to normal (non-reduce_only) orders.
         if !reduce_only {
+            if take_profit <= 0.0 || take_profit > 10_000_000.0 {
+                return Err(ToolError::InvalidParameters(format!(
+                    "take_profit {take_profit} is out of range"
+                )));
+            }
+            if stop_loss <= 0.0 || stop_loss > 10_000_000.0 {
+                return Err(ToolError::InvalidParameters(format!(
+                    "stop_loss {stop_loss} is out of range"
+                )));
+            }
             if is_buy && take_profit <= price {
                 return Err(ToolError::InvalidParameters(
                     "For a LONG order, take_profit must be above the entry price".to_string(),
@@ -870,6 +870,13 @@ impl Tool for HyperliquidTradeTool {
         let size_str = format_size(size);
         let nonce = Utc::now().timestamp_millis() as u64;
 
+        // Derive signing address for diagnostics — helps identify key/account mismatches.
+        let signer_address = {
+            let signing_key = decode_private_key(self.private_key.expose_secret())?;
+            derive_eth_address(&signing_key)
+        };
+        tracing::debug!("hyperliquid_trade: signing with address {signer_address}");
+
         // ── Build order batch ─────────────────────────────────────────────────
         let (action, payload) = if reduce_only {
             // Single reduce-only GTC limit order — closes an existing position.
@@ -878,7 +885,7 @@ impl Tool for HyperliquidTradeTool {
             let (r, s, v) = sign_hl_order_batch(
                 self.private_key.expose_secret(), &action, nonce, self.vault_address,
             )?;
-            let payload = serde_json::json!({
+            let mut payload = serde_json::json!({
                 "action": {
                     "type": "order",
                     "orders": [{
@@ -895,6 +902,9 @@ impl Tool for HyperliquidTradeTool {
                 "nonce": nonce,
                 "signature": { "r": r, "s": s, "v": v }
             });
+            if let Some(vault) = self.vault_address {
+                payload["vaultAddress"] = serde_json::json!(format!("0x{}", hex::encode(vault)));
+            }
             (action, payload)
         } else {
             // Normal batch: entry GTC limit + TP trigger + SL trigger.
@@ -909,7 +919,7 @@ impl Tool for HyperliquidTradeTool {
             let (r, s, v) = sign_hl_order_batch(
                 self.private_key.expose_secret(), &action, nonce, self.vault_address,
             )?;
-            let payload = serde_json::json!({
+            let mut payload = serde_json::json!({
                 "action": {
                     "type": "order",
                     "orders": [
@@ -935,6 +945,9 @@ impl Tool for HyperliquidTradeTool {
                 "nonce": nonce,
                 "signature": { "r": r, "s": s, "v": v }
             });
+            if let Some(vault) = self.vault_address {
+                payload["vaultAddress"] = serde_json::json!(format!("0x{}", hex::encode(vault)));
+            }
             (action, payload)
         };
         let _ = &action; // used in signing above
@@ -955,7 +968,9 @@ impl Tool for HyperliquidTradeTool {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             return Err(ToolError::ExternalService(format!(
-                "HyperLiquid API returned {status}: {body}"
+                "HyperLiquid API returned {status}: {body} \
+                (signer_address={signer_address}, vault={:?})",
+                self.vault_address.map(|v| format!("0x{}", hex::encode(v)))
             )));
         }
 
@@ -967,6 +982,7 @@ impl Tool for HyperliquidTradeTool {
         let result = if reduce_only {
             serde_json::json!({
                 "status": "close_order_submitted",
+                "signer_address": signer_address,
                 "reduce_only": true,
                 "side": if is_buy { "BUY (closing SHORT)" } else { "SELL (closing LONG)" },
                 "asset_index": asset_index,
@@ -980,6 +996,7 @@ impl Tool for HyperliquidTradeTool {
             let sl_str = format_price(stop_loss);
             serde_json::json!({
                 "status": "order_submitted",
+                "signer_address": signer_address,
                 "side": if is_buy { "LONG" } else { "SHORT" },
                 "asset_index": asset_index,
                 "entry_price": price_str,

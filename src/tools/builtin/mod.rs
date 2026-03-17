@@ -48,7 +48,7 @@ pub mod image_edit;
 pub mod image_gen;
 
 pub use html_converter::convert_html_to_markdown;
-pub use hyperliquid::{HyperliquidAnalyzeTool, HyperliquidBalanceTool, HyperliquidTradeTool};
+pub use hyperliquid::{HyperliquidAnalyzeTool, HyperliquidBalanceTool, HyperliquidExecuteTool, HyperliquidTradeTool};
 pub use image_analyze::ImageAnalyzeTool;
 pub use image_edit::ImageEditTool;
 pub use image_gen::ImageGenerateTool;

@@ -37,7 +37,7 @@ Two cron routines run every 15 minutes (created/synced at startup):
 | Routine | Schedule | Tool | Purpose |
 |---------|----------|------|---------|
 | `hyperliquid-btc-15m` | `:00:15` / `:15:15` / `:30:15` / `:45:15` | `hyperliquid_analyze` | Fetch signal — **tool auto-saves to `btc/signal/latest`** |
-| `hyperliquid-btc-trader` | `:03:15` / `:18:15` / `:33:15` / `:48:15` | `memory_read`, `hyperliquid_balance`, `hyperliquid_trade` | Read signal → check positions → trade |
+| `hyperliquid-btc-trader` | `:03:15` / `:18:15` / `:33:15` / `:48:15` | `hyperliquid_execute` | Single-call executor: reads signal → checks positions → trades |
 
 Routine 1 fires 15s after candle close. Routine 2 fires 3 min later.
 
@@ -74,6 +74,14 @@ Key output fields:
 | `spot_usdc_usd` | Spot USDC (used as margin on unified accounts, no transfer needed) |
 | `open_positions` | List of `{coin, side, size, entry_price, unrealized_pnl}` |
 
+### `hyperliquid_execute` — no parameters
+
+Autonomous executor used by the trader routine. Reads `btc/signal/latest`, checks
+open positions, and places/manages orders in one call. Returns:
+`{"action": "trade_placed"|"reversed"|"skip", "reason": "..."}`.
+
+---
+
 ### `hyperliquid_trade` — required: `price`
 
 ```
@@ -82,7 +90,7 @@ hyperliquid_trade(
   price       = <limit_entry from analyze>  # required
   take_profit = <take_profit from analyze>  # required for new positions
   stop_loss   = <stop_loss from analyze>    # required for new positions
-  leverage    = <leverage from analyze>     # 50 / 75 / 100 — auto-sizes position
+  leverage    = <leverage from analyze>     # 20 / 30 / 40 — auto-sizes position
   # size omitted → auto-calculated from effective_balance_usd
 )
 ```
@@ -109,8 +117,9 @@ Check `open_positions` from `hyperliquid_balance` for `coin = "BTC"`:
 | Open BTC position | New signal | Action |
 |-------------------|------------|--------|
 | None | LONG or SHORT | Trade if `rr_ratio ≥ 1.2` and `sl_pct_leveraged ≤ 0.50` |
+| None | NEUTRAL | **Skip** — no signal |
 | Same direction | any | **Skip** — no pyramiding |
-| NEUTRAL | any | **Skip** — let TP/SL handle exit |
+| Any | NEUTRAL | **Skip** — let TP/SL handle exit |
 | Opposite (reversal) | LONG or SHORT | Decide — see below |
 
 **Reversal — close and reverse** if any:

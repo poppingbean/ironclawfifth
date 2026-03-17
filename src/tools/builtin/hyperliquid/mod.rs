@@ -25,10 +25,12 @@
 //! is an agent (API) wallet key. Leave unset when using the main wallet key directly.
 
 mod analysis;
+mod execute;
 pub mod indicators;
 mod trading;
 
 pub use analysis::HyperliquidAnalyzeTool;
+pub use execute::HyperliquidExecuteTool;
 pub use trading::{HyperliquidBalanceTool, HyperliquidTradeTool};
 
 /// Cancel any active (non-terminal) jobs linked to previous runs of a routine.
@@ -187,41 +189,19 @@ pub async fn seed_hyperliquid_routine(store: &std::sync::Arc<dyn crate::db::Data
     )
     .await;
 
-    // ── Routine 2: Read signal & trade ────────────────────────────────────────
+    // ── Routine 2: Execute trade ──────────────────────────────────────────────
     seed_or_sync_routine(
         store,
         "hyperliquid-btc-trader",
-        "Read latest BTC signal from memory and place order if conditions are met (every 15 min at T+3min15s).",
+        "Execute BTC trade based on latest signal — reads signal, checks positions, places order (every 15 min at T+3min15s).",
         "15 3,18,33,48 * * * *",
         crate::agent::routine::RoutineAction::FullJob {
             title: "HyperLiquid BTC order placement".to_string(),
-            description: "\
-                Call memory_read(path='btc/signal/latest') and hyperliquid_balance() simultaneously.\n\
-                \n\
-                If memory_read returns found=false: stop, no signal available yet.\n\
-                Extract from signal: signal, is_buy, signal_score, limit_entry, take_profit, stop_loss, leverage, rr_ratio, sl_pct_leveraged.\n\
-                From balance: effective_balance_usd (USE THIS — perp=0 on unified accounts is NOT an error), open_positions.\n\
-                \n\
-                Find any open_positions entry with coin=BTC. Then immediately act:\n\
-                \n\
-                NO BTC position + signal=LONG or SHORT + sl_pct_leveraged<=0.50 + rr_ratio>=1.2:\n\
-                  call hyperliquid_trade(is_buy, price=limit_entry, take_profit, stop_loss, leverage). Omit size.\n\
-                \n\
-                BTC position exists, SAME direction as signal: done, no action.\n\
-                \n\
-                BTC position exists, OPPOSITE direction (reversal):\n\
-                  if unrealized_pnl<=0 OR (rr_ratio>=1.5 AND signal_score>=70):\n\
-                    call hyperliquid_trade(reduce_only=true, is_buy=<opposite_of_existing>, price=limit_entry, size=<existing_size>)\n\
-                    then call hyperliquid_trade(is_buy, price=limit_entry, take_profit, stop_loss, leverage)\n\
-                  else if unrealized_pnl>0 AND abs(signal_score-50)<15: done, keep existing position.\n\
-                \n\
-                signal=NEUTRAL or is_buy=null: done, no action."
+            description: "Call hyperliquid_execute (no parameters). Done."
                 .to_string(),
-            max_iterations: 4,
+            max_iterations: 2,
             tool_permissions: vec![
-                "memory_read".to_string(),
-                "hyperliquid_balance".to_string(),
-                "hyperliquid_trade".to_string(),
+                "hyperliquid_execute".to_string(),
             ],
         },
         600,
