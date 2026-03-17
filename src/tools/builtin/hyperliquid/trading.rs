@@ -306,8 +306,12 @@ async fn fetch_spot_usdc_balance(
     Ok(usdc)
 }
 
-/// Fetch the HyperLiquid account balance (USD) for the given address.
-/// Returns perp `accountValue`; if that is zero, falls back to spot USDC balance.
+/// Fetch the effective trading balance for the given address.
+///
+/// For unified accounts, spot USDC IS the perp margin — no transfer needed.
+/// Returns perp `accountValue` when funds are already in perp margin;
+/// otherwise falls back to spot USDC (unified account behaviour).
+/// Errors only if both are zero (genuinely no funds).
 async fn fetch_hl_balance(client: &reqwest::Client, address: &str) -> Result<f64, ToolError> {
     let payload = serde_json::json!({
         "type": "clearinghouseState",
@@ -347,8 +351,16 @@ async fn fetch_hl_balance(client: &reqwest::Client, address: &str) -> Result<f64
         return Ok(perp_balance);
     }
 
-    // No perp margin deposited — fall back to spot USDC wallet
-    fetch_spot_usdc_balance(client, address).await
+    // Unified account: spot USDC serves as perp margin directly.
+    let spot = fetch_spot_usdc_balance(client, address).await?;
+    if spot > 0.0 {
+        return Ok(spot);
+    }
+
+    Err(ToolError::InvalidParameters(
+        "Account has no funds (perp margin and spot USDC are both $0). Deposit USDC first."
+            .to_string(),
+    ))
 }
 
 /// Return the fraction of account balance to allocate based on leverage tier.
@@ -549,19 +561,29 @@ impl Tool for HyperliquidBalanceTool {
             })
             .unwrap_or_default();
 
-        // Also fetch spot USDC so the user can see funds not yet in perp margin
+        // Also fetch spot USDC — for unified accounts this IS the trading balance.
         let spot_usdc = fetch_spot_usdc_balance(&self.client, &address).await.unwrap_or(0.0);
+
+        // effective_balance is what hyperliquid_trade uses for auto-sizing:
+        // perp accountValue when non-zero, otherwise spot USDC (unified account).
+        let effective_balance = if account_value > 0.0 { account_value } else { spot_usdc };
 
         let result = serde_json::json!({
             "address": address,
-            "account_equity_usd": account_value,
+            // effective_balance_usd is the correct balance for trading decisions.
+            // On unified accounts with no open perp positions, this equals spot_usdc_usd.
+            "effective_balance_usd": effective_balance,
+            "spot_usdc_usd": spot_usdc,
+            "perp_account_equity_usd": account_value,
             "available_margin_usd": available_margin,
             "total_margin_used_usd": total_margin_used,
             "total_position_notional_usd": total_ntl_pos,
-            "raw_usdc_balance_usd": total_raw_usd,
-            "spot_usdc_balance_usd": spot_usdc,
-            "effective_balance_usd": if account_value > 0.0 { account_value } else { spot_usdc },
             "open_positions": positions,
+            "unified_account_note": if account_value == 0.0 && spot_usdc > 0.0 {
+                "Unified account: spot USDC is your trading balance. No transfer needed."
+            } else {
+                ""
+            },
             "queried_at": chrono::Utc::now().to_rfc3339()
         });
 

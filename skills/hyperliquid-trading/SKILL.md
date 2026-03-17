@@ -76,8 +76,11 @@ Top-level fields you need:
 
 ### Step 3 — Position Size (auto-calculated)
 
-`hyperliquid_trade` automatically fetches your HyperLiquid account balance and
-calculates position size based on the leverage tier:
+`hyperliquid_trade` automatically fetches your balance and calculates position size.
+
+**Unified account:** spot USDC is your trading balance — no transfer to perp is needed.
+The balance is resolved as: perp `accountValue` if > 0, otherwise spot USDC.
+**Do NOT treat `perp_account_equity_usd: 0` as "no funds"** — check `effective_balance_usd`.
 
 | Leverage | Balance allocation | Example ($10,000 balance) |
 |----------|--------------------|---------------------------|
@@ -88,6 +91,15 @@ calculates position size based on the leverage tier:
 
 Pass the `leverage` field from the analysis output and omit `size` to use auto-sizing.
 To override, pass an explicit `size` in BTC.
+
+#### `hyperliquid_balance` key fields
+
+| Field | Meaning |
+|-------|---------|
+| `effective_balance_usd` | **Use this for all trading decisions** — perp equity or spot USDC (whichever is non-zero) |
+| `spot_usdc_usd` | Raw spot wallet USDC |
+| `perp_account_equity_usd` | Perp margin equity (0 on unified accounts with no open positions — **not** an error) |
+| `unified_account_note` | Non-empty when spot USDC is being used as margin |
 
 ### Step 4 — Place the Order
 
