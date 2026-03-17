@@ -834,8 +834,12 @@ impl Tool for HyperliquidTradeTool {
         let size = match size_opt {
             Some(s) => s,
             None => {
-                let signing_key = decode_private_key(self.private_key.expose_secret())?;
-                let address = derive_eth_address(&signing_key);
+                let address = if let Some(vault) = self.vault_address {
+                    format!("0x{}", hex::encode(vault))
+                } else {
+                    let signing_key = decode_private_key(self.private_key.expose_secret())?;
+                    derive_eth_address(&signing_key)
+                };
                 let balance = fetch_hl_balance(&self.client, &address).await?;
                 let alloc = allocation_pct_for_leverage(leverage);
                 let margin_usd = balance * alloc;
