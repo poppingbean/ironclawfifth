@@ -97,20 +97,32 @@ pub async fn seed_hyperliquid_routine(store: &std::sync::Arc<dyn crate::db::Data
     // Canonical action — updated on every startup so the prompt stays in sync.
     let canonical_action = crate::agent::routine::RoutineAction::FullJob {
         title: "HyperLiquid BTC 15m trade".to_string(),
-        description: "Step 1: call hyperliquid_analyze (no parameters). \
+        description: "Step 1: call hyperliquid_balance (no parameters). \
+            Check open_positions for any entry with coin='BTC'. \
+            If a BTC position exists, note its side (LONG or SHORT). \
+            Step 2: call hyperliquid_analyze (no parameters). \
             Fetches 250 BTC candles per timeframe directly from HyperLiquid and returns a \
             JSON object — read ALL fields directly from that result. \
-            Step 2: check trade conditions — only proceed if ALL are true: \
+            Step 3: apply position conflict rules: \
+            (a) If no open BTC position — proceed normally to Step 4. \
+            (b) If open position side MATCHES the new signal direction \
+                (e.g. existing LONG and signal is also LONG) — STOP, do not trade. \
+                Pyramiding at high leverage is forbidden. \
+            (c) If open position side is OPPOSITE to the new signal \
+                (e.g. existing LONG but signal is SHORT, or vice versa) — STOP, do not trade. \
+                Instead report the reversal signal clearly: include signal, signal_score, \
+                limit_entry, take_profit, stop_loss, leverage, rr_ratio so the user can \
+                decide to manually close and re-enter. \
+            Step 4 (only when no open position): check trade conditions — only proceed if ALL: \
             signal is LONG or SHORT (not NEUTRAL), is_buy is present, \
             sl_pct_leveraged ≤ 0.40, rr_ratio ≥ 1.2. \
-            Step 3: if conditions pass, call hyperliquid_trade with: \
+            Step 5: call hyperliquid_trade with: \
             is_buy (boolean from analysis), price (use limit_entry from analysis), \
             take_profit (from analysis), stop_loss (from analysis), leverage (from analysis). \
             Omit size — it is auto-calculated from effective_balance_usd. \
             IMPORTANT — balance: this account uses HyperLiquid unified account mode. \
             Spot USDC is the trading balance. Do NOT treat perp_account_equity_usd=0 as \
-            insufficient funds — always use effective_balance_usd from hyperliquid_balance. \
-            Do NOT trade when signal is NEUTRAL or is_buy is absent."
+            insufficient funds — always use effective_balance_usd from hyperliquid_balance."
             .to_string(),
         max_iterations: 10,
         tool_permissions: vec![

@@ -40,6 +40,29 @@ HyperLiquid. Always run analysis before placing an order. Never skip signal revi
 
 ## Workflow
 
+### Step 0 — Check for Open Position (mandatory)
+
+```
+hyperliquid_balance
+```
+
+Check `open_positions` for any entry with `coin = "BTC"` and note its `side` (LONG or SHORT).
+
+HyperLiquid merges all orders into a single position per side. Opening another order while one
+exists will uncontrollably increase size and stack redundant TP/SL triggers.
+
+| Existing position | New signal | Action |
+|-------------------|------------|--------|
+| None | LONG or SHORT | Proceed to analysis → trade |
+| LONG | LONG | **Skip** — no pyramiding at high leverage |
+| SHORT | SHORT | **Skip** — no pyramiding at high leverage |
+| LONG | SHORT | **Stop + notify** — reversal detected; report signal details so user can manually close and re-enter |
+| SHORT | LONG | **Stop + notify** — reversal detected; report signal details so user can manually close and re-enter |
+| Any | NEUTRAL | **Skip** — existing TP/SL handles the exit |
+
+When reporting a reversal, always include: `signal`, `signal_score`, `limit_entry`,
+`take_profit`, `stop_loss`, `leverage`, `rr_ratio`.
+
 ### Step 1 — Run Analysis
 
 ```
