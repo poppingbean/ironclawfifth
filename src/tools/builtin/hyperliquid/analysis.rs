@@ -18,7 +18,7 @@ use super::indicators::{self, Candle, IndicatorSet};
 
 const HL_INFO_URL: &str = "https://api.hyperliquid.xyz/info";
 const COIN: &str = "BTC";
-const CANDLE_LIMIT: u32 = 500;
+const CANDLE_LIMIT: u32 = 250;
 
 /// Timeframe identifiers matching HyperLiquid interval strings.
 #[derive(Debug, Clone, Copy)]

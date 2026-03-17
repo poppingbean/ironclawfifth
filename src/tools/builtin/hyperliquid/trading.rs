@@ -571,10 +571,12 @@ impl Tool for HyperliquidTradeTool {
     fn description(&self) -> &str {
         "Places a GTC limit order on HyperLiquid perpetuals with mandatory take-profit \
         and stop-loss trigger orders in the same batch. Always call hyperliquid_analyze \
-        first. Auto-fetches account balance and calculates position size from the leverage \
-        tier (×100 → 10%, ×75 → 15%, ×50 → 30%, ×25 → 50% of balance). Orders are \
-        signed with EIP-712 (Agent/Exchange domain, msgpack action hash) and include \
-        the required builder fee tag."
+        first and pass its output fields DIRECTLY — do NOT use the json tool to parse \
+        hyperliquid_analyze output. Pass is_buy (boolean) OR signal (\"LONG\"/\"SHORT\") \
+        from the analysis result. Auto-fetches account balance and calculates position size \
+        from the leverage tier (×100 → 10%, ×75 → 15%, ×50 → 30%, ×25 → 50% of balance). \
+        Orders are signed with EIP-712 (Agent/Exchange domain, msgpack action hash) and \
+        include the required builder fee tag."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -583,7 +585,12 @@ impl Tool for HyperliquidTradeTool {
             "properties": {
                 "is_buy": {
                     "type": "boolean",
-                    "description": "true = LONG (buy), false = SHORT (sell)"
+                    "description": "true = LONG (buy), false = SHORT (sell). Pass the is_buy field from hyperliquid_analyze directly."
+                },
+                "signal": {
+                    "type": "string",
+                    "enum": ["LONG", "SHORT", "BUY", "SELL"],
+                    "description": "Alternative to is_buy: pass the signal field from hyperliquid_analyze (\"LONG\" or \"SHORT\"). Ignored if is_buy is also provided."
                 },
                 "price": {
                     "type": "number",
@@ -612,7 +619,7 @@ impl Tool for HyperliquidTradeTool {
                     "default": 0
                 }
             },
-            "required": ["is_buy", "price", "take_profit", "stop_loss", "leverage"]
+            "required": ["price", "take_profit", "stop_loss", "leverage"]
         })
     }
 
@@ -645,18 +652,28 @@ impl Tool for HyperliquidTradeTool {
         let start = Instant::now();
 
         // ── Parameter extraction ──────────────────────────────────────────────
+        // Accept is_buy (boolean) OR signal ("LONG"/"SHORT") — whichever the LLM provides
+        // from the hyperliquid_analyze output.
         let is_buy = params
             .get("is_buy")
             .and_then(|v| {
-                // Accept both JSON boolean and string "true"/"false" for robustness.
                 v.as_bool().or_else(|| match v.as_str() {
                     Some("true") => Some(true),
                     Some("false") => Some(false),
                     _ => None,
                 })
             })
+            .or_else(|| {
+                params.get("signal").and_then(|v| match v.as_str() {
+                    Some("LONG") | Some("BUY") => Some(true),
+                    Some("SHORT") | Some("SELL") => Some(false),
+                    _ => None,
+                })
+            })
             .ok_or_else(|| {
-                ToolError::InvalidParameters("Missing required 'is_buy' parameter".to_string())
+                ToolError::InvalidParameters(
+                    "Missing required direction: provide is_buy (boolean) or signal (\"LONG\"/\"SHORT\")".to_string(),
+                )
             })?;
 
         let price = params
@@ -936,7 +953,47 @@ mod tests {
             )
             .await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("is_buy"));
+        assert!(result.unwrap_err().to_string().contains("direction"));
+    }
+
+    #[tokio::test]
+    async fn test_signal_string_long() {
+        let tool = HyperliquidTradeTool::new(
+            "0000000000000000000000000000000000000000000000000000000000000001".to_string(),
+            None,
+        );
+        let ctx = JobContext::default();
+        // "signal": "LONG" should be accepted as is_buy = true; will fail on network, not on params
+        let result = tool
+            .execute(
+                serde_json::json!({"signal": "LONG", "price": 95000.0, "size": 0.01,
+                    "leverage": 50, "take_profit": 96000.0, "stop_loss": 94000.0}),
+                &ctx,
+            )
+            .await;
+        // Should not fail with a parameter error
+        if let Err(e) = &result {
+            assert!(!e.to_string().contains("direction"), "unexpected param error: {e}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_signal_string_short() {
+        let tool = HyperliquidTradeTool::new(
+            "0000000000000000000000000000000000000000000000000000000000000001".to_string(),
+            None,
+        );
+        let ctx = JobContext::default();
+        let result = tool
+            .execute(
+                serde_json::json!({"signal": "SHORT", "price": 95000.0, "size": 0.01,
+                    "leverage": 50, "take_profit": 94000.0, "stop_loss": 96000.0}),
+                &ctx,
+            )
+            .await;
+        if let Err(e) = &result {
+            assert!(!e.to_string().contains("direction"), "unexpected param error: {e}");
+        }
     }
 
     #[tokio::test]

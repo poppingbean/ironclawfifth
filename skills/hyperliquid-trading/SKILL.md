@@ -2,10 +2,10 @@
 name: hyperliquid-trading
 description: >
   Automated BTC perpetuals trading on HyperLiquid via multi-timeframe technical
-  analysis. Fetches BTCUSDT data from Binance Futures, runs 14 indicators across
-  15m/1h/4h timeframes (RSI, MACD, Bollinger Bands, EMA50/200, ATR, Stochastic,
-  Williams %R, CCI, ADX, OBV, VWAP, Ichimoku, Fibonacci), and places limit orders
-  with EIP-712 signing and the required builder fee tag.
+  analysis. Fetches BTC candle data directly from the HyperLiquid exchange, runs
+  14 indicators across 15m/1h/4h timeframes (RSI, MACD, Bollinger Bands, EMA50/200,
+  ATR, Stochastic, Williams %R, CCI, ADX, OBV, VWAP, Ichimoku, Fibonacci), and
+  places limit orders with EIP-712 signing and the required builder fee tag.
 metadata:
   keywords:
     - hyperliquid
@@ -46,7 +46,7 @@ HyperLiquid. Always run analysis before placing an order. Never skip signal revi
 hyperliquid_analyze
 ```
 
-No parameters required. Fetches 500 candles on 15m, 1h, and 4h from the HyperLiquid
+No parameters required. Fetches 250 candles on 15m, 1h, and 4h from the HyperLiquid
 exchange and returns a full signal with indicator breakdown.
 
 - **4h timeframe** drives trend direction (weighted ×0.45 in the multi-timeframe score)
@@ -54,7 +54,7 @@ exchange and returns a full signal with indicator breakdown.
 
 ### Step 2 — Review the Signal
 
-`hyperliquid_analyze` returns a JSON object. **Read all fields directly from that result — do NOT use the `json` tool to parse or query it.**
+`hyperliquid_analyze` returns a JSON object. **Read all fields directly from that result.** If you must query a nested field, the `json` tool accepts `{"source_tool_call_id": "<id>", "path": "field"}` — `operation` is optional and will be inferred automatically.
 
 Top-level fields you need:
 
@@ -103,7 +103,7 @@ hyperliquid_trade(
 )
 ```
 
-Do NOT use the `json` tool at any point in this workflow.
+Prefer reading values directly from the analysis result. If needed, the `json` tool works without specifying `operation` — it is inferred from context.
 
 `take_profit` and `stop_loss` are **required**. The tool submits all three orders
 (entry GTC limit + TP trigger + SL trigger) in a single signed batch. The TP and SL

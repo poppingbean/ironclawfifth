@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 
 use crate::context::JobContext;
-use crate::tools::tool::{Tool, ToolError, ToolOutput, require_param, require_str};
+use crate::tools::tool::{Tool, ToolError, ToolOutput, require_param};
 
 /// Tool for JSON manipulation (parse, query, transform).
 pub struct JsonTool;
@@ -17,7 +17,9 @@ impl Tool for JsonTool {
     fn description(&self) -> &str {
         "Parse, query, and transform JSON data. Supports JSONPath-like queries. \
          Use `source_tool_call_id` to reference the full output of a previous tool call \
-         (avoids truncation issues with large responses)."
+         (avoids truncation issues with large responses). \
+         `operation` is optional: if `path` is provided it defaults to \"query\"; \
+         if `data` is a string it defaults to \"parse\"; otherwise defaults to \"stringify\"."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -27,7 +29,7 @@ impl Tool for JsonTool {
                 "operation": {
                     "type": "string",
                     "enum": ["parse", "query", "stringify", "validate"],
-                    "description": "The JSON operation to perform"
+                    "description": "The JSON operation to perform. Optional — inferred from other params when omitted."
                 },
                 "data": {
                     "description": "JSON input data. Pass a string for parse, or any JSON value otherwise. Not required when source_tool_call_id is provided."
@@ -41,7 +43,7 @@ impl Tool for JsonTool {
                     "description": "JSONPath-like path for query operation (e.g., 'foo.bar[0].baz')"
                 }
             },
-            "required": ["operation"]
+            "required": []
         })
     }
 
@@ -51,8 +53,6 @@ impl Tool for JsonTool {
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
-
-        let operation = require_str(&params, "operation")?;
 
         // Resolve data: from stash (via source_tool_call_id) or from params
         let data_value =
@@ -72,6 +72,25 @@ impl Tool for JsonTool {
                 require_param(&params, "data")?.clone()
             };
         let data = &data_value;
+
+        // Infer operation when omitted:
+        //   - path present           → "query"
+        //   - data/stash is a string → "parse"
+        //   - otherwise              → "stringify"
+        let inferred;
+        let operation = match params.get("operation").and_then(|v| v.as_str()) {
+            Some(op) => op,
+            None => {
+                inferred = if params.get("path").and_then(|v| v.as_str()).is_some() {
+                    "query"
+                } else if data.is_string() {
+                    "parse"
+                } else {
+                    "stringify"
+                };
+                inferred
+            }
+        };
 
         let result = match operation {
             "parse" => {
@@ -267,6 +286,41 @@ mod tests {
         let result = tool.execute(params, &ctx).await.unwrap();
         let stringified = result.result.as_str().unwrap();
         assert!(stringified.contains("\"key\": \"value\""));
+    }
+
+    #[tokio::test]
+    async fn test_inferred_query_operation_from_path() {
+        use crate::context::JobContext;
+        let ctx = JobContext::with_user("test", "chat", "test-session");
+        let tool = JsonTool;
+        // No "operation" — should infer "query" because "path" is present
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "data": {"is_buy": true, "signal": "LONG"},
+                    "path": "is_buy"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.result, serde_json::json!(true));
+    }
+
+    #[tokio::test]
+    async fn test_inferred_parse_operation_from_string_data() {
+        use crate::context::JobContext;
+        let ctx = JobContext::with_user("test", "chat", "test-session");
+        let tool = JsonTool;
+        // No "operation" — should infer "parse" because data is a string
+        let result = tool
+            .execute(
+                serde_json::json!({"data": "{\"ok\": true}"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.result, serde_json::json!({"ok": true}));
     }
 
     #[test]
