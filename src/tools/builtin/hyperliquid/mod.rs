@@ -94,19 +94,50 @@ pub async fn seed_hyperliquid_routine(store: &std::sync::Arc<dyn crate::db::Data
         }
     };
 
+    // Canonical action — updated on every startup so the prompt stays in sync.
+    let canonical_action = crate::agent::routine::RoutineAction::FullJob {
+        title: "HyperLiquid BTC 15m trade".to_string(),
+        description: "Step 1: call hyperliquid_analyze (no parameters). \
+            Fetches 250 BTC candles per timeframe directly from HyperLiquid and returns a \
+            JSON object — read ALL fields directly from that result. \
+            Step 2: check trade conditions — only proceed if ALL are true: \
+            signal is LONG or SHORT (not NEUTRAL), is_buy is present, \
+            sl_pct_leveraged ≤ 0.40, rr_ratio ≥ 1.2. \
+            Step 3: if conditions pass, call hyperliquid_trade with: \
+            is_buy (boolean from analysis), price (use limit_entry from analysis), \
+            take_profit (from analysis), stop_loss (from analysis), leverage (from analysis). \
+            Omit size — it is auto-calculated from effective_balance_usd. \
+            IMPORTANT — balance: this account uses HyperLiquid unified account mode. \
+            Spot USDC is the trading balance. Do NOT treat perp_account_equity_usd=0 as \
+            insufficient funds — always use effective_balance_usd from hyperliquid_balance. \
+            Do NOT trade when signal is NEUTRAL or is_buy is absent."
+            .to_string(),
+        max_iterations: 10,
+        tool_permissions: vec![
+            "hyperliquid_analyze".to_string(),
+            "hyperliquid_balance".to_string(),
+            "hyperliquid_trade".to_string(),
+        ],
+    };
+    let canonical_description = "Analyze BTC perpetuals and place a trade if signal is clear \
+        (every 15 min at T+15s). Uses unified account — spot USDC is the trading balance."
+        .to_string();
+
     match store.get_routine_by_name(USER_ID, ROUTINE_NAME).await {
         Ok(Some(existing)) => {
             // Cancel stale jobs from the previous process lifetime.
             cancel_active_routine_jobs(store, existing.id).await;
 
-            // Reschedule: bump next_fire_at to the next future slot.
+            // Reschedule and sync prompt/action to latest code on every startup.
             let mut updated = existing;
             updated.next_fire_at = next_fire;
+            updated.description = canonical_description;
+            updated.action = canonical_action;
             updated.updated_at = chrono::Utc::now();
 
             match store.update_routine(&updated).await {
                 Ok(()) => tracing::info!(
-                    "Rescheduled HyperLiquid routine '{}' (next fire: {:?})",
+                    "Rescheduled and synced HyperLiquid routine '{}' (next fire: {:?})",
                     ROUTINE_NAME,
                     updated.next_fire_at
                 ),
@@ -118,36 +149,14 @@ pub async fn seed_hyperliquid_routine(store: &std::sync::Arc<dyn crate::db::Data
             let routine = crate::agent::routine::Routine {
                 id: uuid::Uuid::new_v4(),
                 name: ROUTINE_NAME.to_string(),
-                description: "Analyze BTC perpetuals and place a trade if signal is clear (every 15 min at T+15s)".to_string(),
+                description: canonical_description,
                 user_id: USER_ID.to_string(),
                 enabled: true,
                 trigger: crate::agent::routine::Trigger::Cron {
                     schedule: SCHEDULE.to_string(),
                     timezone: None,
                 },
-                action: crate::agent::routine::RoutineAction::FullJob {
-                    title: "HyperLiquid BTC 15m trade".to_string(),
-                    description: "Step 1: call hyperliquid_analyze (no parameters). \
-                        It fetches 250 BTC candles per timeframe directly from HyperLiquid and \
-                        returns a JSON object — read ALL fields directly from that result, \
-                        do NOT call the json tool to parse or query it. \
-                        Step 2: check conditions — only proceed if: \
-                        signal is LONG or SHORT (not NEUTRAL), is_buy is present, \
-                        sl_pct_leveraged ≤ 0.40, rr_ratio ≥ 1.2. \
-                        Step 3: if all conditions pass, call hyperliquid_trade with: \
-                        is_buy (boolean, directly from analysis), \
-                        price (use limit_entry from analysis), \
-                        take_profit (from analysis), stop_loss (from analysis), \
-                        leverage (from analysis). \
-                        Position size is auto-calculated from account balance — omit size. \
-                        Do NOT trade when signal is NEUTRAL or is_buy is absent."
-                        .to_string(),
-                    max_iterations: 10,
-                    tool_permissions: vec![
-                        "hyperliquid_analyze".to_string(),
-                        "hyperliquid_trade".to_string(),
-                    ],
-                },
+                action: canonical_action,
                 guardrails: crate::agent::routine::RoutineGuardrails {
                     cooldown: std::time::Duration::from_secs(600),
                     max_concurrent: 1,
