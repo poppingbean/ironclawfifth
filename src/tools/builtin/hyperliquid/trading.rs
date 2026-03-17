@@ -647,12 +647,11 @@ impl Tool for HyperliquidTradeTool {
     fn description(&self) -> &str {
         "Places a GTC limit order on HyperLiquid perpetuals with mandatory take-profit \
         and stop-loss trigger orders in the same batch. Always call hyperliquid_analyze \
-        first and pass its output fields DIRECTLY — do NOT use the json tool to parse \
-        hyperliquid_analyze output. Pass is_buy (boolean) OR signal (\"LONG\"/\"SHORT\") \
-        from the analysis result. Auto-fetches account balance and calculates position size \
-        from the leverage tier (×100 → 10%, ×75 → 15%, ×50 → 30%, ×25 → 50% of balance). \
-        Orders are signed with EIP-712 (Agent/Exchange domain, msgpack action hash) and \
-        include the required builder fee tag."
+        first and pass its output fields DIRECTLY. Pass is_buy (boolean) OR signal \
+        (\"LONG\"/\"SHORT\") from the analysis result. Auto-fetches account balance and \
+        calculates position size from the leverage tier. \
+        Set reduce_only=true to close an existing position: places a single reduce-only \
+        limit order at the given price with no TP/SL — use this before reversing direction."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -674,20 +673,24 @@ impl Tool for HyperliquidTradeTool {
                 },
                 "take_profit": {
                     "type": "number",
-                    "description": "Take-profit trigger price in USD (use take_profit from hyperliquid_analyze)"
+                    "description": "Take-profit trigger price in USD (use take_profit from hyperliquid_analyze). Not required when reduce_only=true."
                 },
                 "stop_loss": {
                     "type": "number",
-                    "description": "Stop-loss trigger price in USD (use stop_loss from hyperliquid_analyze)"
+                    "description": "Stop-loss trigger price in USD (use stop_loss from hyperliquid_analyze). Not required when reduce_only=true."
                 },
                 "leverage": {
                     "type": "integer",
-                    "description": "Leverage tier from hyperliquid_analyze (25, 50, 75, or 100). Used to auto-calculate position size from account balance.",
+                    "description": "Leverage tier from hyperliquid_analyze (25, 50, 75, or 100). Used to auto-calculate position size from account balance. Not required when reduce_only=true and size is provided.",
                     "enum": [25, 50, 75, 100]
                 },
                 "size": {
                     "type": "number",
-                    "description": "Order size in BTC (minimum 0.001). If omitted, automatically calculated from account balance and leverage tier."
+                    "description": "Order size in BTC (minimum 0.001). Required when reduce_only=true (use the size from open_positions). Otherwise auto-calculated from balance and leverage."
+                },
+                "reduce_only": {
+                    "type": "boolean",
+                    "description": "If true, places a single reduce-only limit order to close an existing position. No TP/SL orders are submitted. Use this to close before reversing direction. Requires size and price; is_buy must be the OPPOSITE of the existing position side."
                 },
                 "asset_index": {
                     "type": "integer",
@@ -695,7 +698,7 @@ impl Tool for HyperliquidTradeTool {
                     "default": 0
                 }
             },
-            "required": ["price", "take_profit", "stop_loss", "leverage"]
+            "required": ["price"]
         })
     }
 
@@ -759,33 +762,38 @@ impl Tool for HyperliquidTradeTool {
                 ToolError::InvalidParameters("Missing required 'price' parameter".to_string())
             })?;
 
-        let take_profit = params
-            .get("take_profit")
-            .and_then(|v| v.as_f64())
-            .ok_or_else(|| {
-                ToolError::InvalidParameters(
-                    "Missing required 'take_profit' parameter".to_string(),
-                )
-            })?;
+        let size_opt = params.get("size").and_then(|v| v.as_f64());
+        let reduce_only = params.get("reduce_only").and_then(|v| v.as_bool()).unwrap_or(false);
+        let take_profit_opt = params.get("take_profit").and_then(|v| v.as_f64());
+        let stop_loss_opt = params.get("stop_loss").and_then(|v| v.as_f64());
 
-        let stop_loss = params
-            .get("stop_loss")
-            .and_then(|v| v.as_f64())
-            .ok_or_else(|| {
+        // TP/SL required for normal orders; not needed for reduce_only close orders.
+        let (take_profit, stop_loss) = if reduce_only {
+            (take_profit_opt.unwrap_or(0.0), stop_loss_opt.unwrap_or(0.0))
+        } else {
+            let tp = take_profit_opt.ok_or_else(|| {
+                ToolError::InvalidParameters("Missing required 'take_profit' parameter".to_string())
+            })?;
+            let sl = stop_loss_opt.ok_or_else(|| {
                 ToolError::InvalidParameters("Missing required 'stop_loss' parameter".to_string())
             })?;
+            (tp, sl)
+        };
 
-        let leverage = params
-            .get("leverage")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as u32)
-            .ok_or_else(|| {
-                ToolError::InvalidParameters(
-                    "Missing required 'leverage' parameter (25/50/75/100)".to_string(),
-                )
-            })?;
-
-        let size_opt = params.get("size").and_then(|v| v.as_f64());
+        let leverage = if reduce_only && size_opt.is_some() {
+            // leverage not needed when closing with explicit size
+            params.get("leverage").and_then(|v| v.as_u64()).map(|v| v as u32).unwrap_or(50)
+        } else {
+            params
+                .get("leverage")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32)
+                .ok_or_else(|| {
+                    ToolError::InvalidParameters(
+                        "Missing required 'leverage' parameter (25/50/75/100)".to_string(),
+                    )
+                })?
+        };
 
         let asset_index = params
             .get("asset_index")
@@ -808,26 +816,28 @@ impl Tool for HyperliquidTradeTool {
                 "stop_loss {stop_loss} is out of range"
             )));
         }
-        // Directional sanity: TP must be above entry for LONG, below for SHORT
-        if is_buy && take_profit <= price {
-            return Err(ToolError::InvalidParameters(
-                "For a LONG order, take_profit must be above the entry price".to_string(),
-            ));
-        }
-        if !is_buy && take_profit >= price {
-            return Err(ToolError::InvalidParameters(
-                "For a SHORT order, take_profit must be below the entry price".to_string(),
-            ));
-        }
-        if is_buy && stop_loss >= price {
-            return Err(ToolError::InvalidParameters(
-                "For a LONG order, stop_loss must be below the entry price".to_string(),
-            ));
-        }
-        if !is_buy && stop_loss <= price {
-            return Err(ToolError::InvalidParameters(
-                "For a SHORT order, stop_loss must be above the entry price".to_string(),
-            ));
+        // Directional sanity (skipped for reduce_only close orders)
+        if !reduce_only {
+            if is_buy && take_profit <= price {
+                return Err(ToolError::InvalidParameters(
+                    "For a LONG order, take_profit must be above the entry price".to_string(),
+                ));
+            }
+            if !is_buy && take_profit >= price {
+                return Err(ToolError::InvalidParameters(
+                    "For a SHORT order, take_profit must be below the entry price".to_string(),
+                ));
+            }
+            if is_buy && stop_loss >= price {
+                return Err(ToolError::InvalidParameters(
+                    "For a LONG order, stop_loss must be below the entry price".to_string(),
+                ));
+            }
+            if !is_buy && stop_loss <= price {
+                return Err(ToolError::InvalidParameters(
+                    "For a SHORT order, stop_loss must be above the entry price".to_string(),
+                ));
+            }
         }
 
         // ── Auto-size from balance if size not supplied ────────────────────────
@@ -857,89 +867,77 @@ impl Tool for HyperliquidTradeTool {
 
         // ── Format prices and size ─────────────────────────────────────────────
         let price_str = format_price(price);
-        let tp_str = format_price(take_profit);
-        let sl_str = format_price(stop_loss);
         let size_str = format_size(size);
         let nonce = Utc::now().timestamp_millis() as u64;
 
-        // ── Build order batch (entry + TP + SL) ───────────────────────────────
-        // TP and SL are reduce-only trigger orders in the opposite direction.
-        let close_is_buy = !is_buy;
-
-        let entry_order = mp_order(
-            asset_index,
-            is_buy,
-            &price_str,
-            &size_str,
-            false,
-            mp_limit_gtc(),
-        );
-        let tp_order = mp_order(
-            asset_index,
-            close_is_buy,
-            &tp_str,
-            &size_str,
-            true,
-            mp_trigger(&tp_str, true),
-        );
-        let sl_order = mp_order(
-            asset_index,
-            close_is_buy,
-            &sl_str,
-            &size_str,
-            true,
-            mp_trigger(&sl_str, false),
-        );
-
-        // "normalTpsl" grouping is required when entry + TP + SL are batched together
-        let action = mp_action(vec![entry_order, tp_order, sl_order], "normalTpsl");
-
-        // ── Sign (msgpack action hash → Agent EIP-712) ────────────────────────
-        let (r, s, v) = sign_hl_order_batch(self.private_key.expose_secret(), &action, nonce, self.vault_address)?;
-
-        // ── Build HTTP payload (action + builder added here, not in hash) ──────
-        let payload = serde_json::json!({
-            "action": {
-                "type": "order",
-                "orders": [
-                    {
+        // ── Build order batch ─────────────────────────────────────────────────
+        let (action, payload) = if reduce_only {
+            // Single reduce-only GTC limit order — closes an existing position.
+            let order = mp_order(asset_index, is_buy, &price_str, &size_str, true, mp_limit_gtc());
+            let action = mp_action(vec![order], "na");
+            let (r, s, v) = sign_hl_order_batch(
+                self.private_key.expose_secret(), &action, nonce, self.vault_address,
+            )?;
+            let payload = serde_json::json!({
+                "action": {
+                    "type": "order",
+                    "orders": [{
                         "a": asset_index,
                         "b": is_buy,
                         "p": price_str,
                         "s": size_str,
-                        "r": false,
+                        "r": true,
                         "t": { "limit": { "tif": "Gtc" } }
-                    },
-                    {
-                        "a": asset_index,
-                        "b": close_is_buy,
-                        "p": tp_str,
-                        "s": size_str,
-                        "r": true,
-                        "t": { "trigger": { "isMarket": true, "triggerPx": tp_str, "tpsl": "tp" } }
-                    },
-                    {
-                        "a": asset_index,
-                        "b": close_is_buy,
-                        "p": sl_str,
-                        "s": size_str,
-                        "r": true,
-                        "t": { "trigger": { "isMarket": true, "triggerPx": sl_str, "tpsl": "sl" } }
-                    }
-                ],
-                "grouping": "normalTpsl",
-                "builder": {
-                    "b": BUILDER_ADDRESS,
-                    "f": BUILDER_FEE
-                }
-            },
-            "nonce": nonce,
-            "signature": {
-                "r": r,
-                "s": s,
-                "v": v
-            }
-        });
+                    }],
+                    "grouping": "na",
+                    "builder": { "b": BUILDER_ADDRESS, "f": BUILDER_FEE }
+                },
+                "nonce": nonce,
+                "signature": { "r": r, "s": s, "v": v }
+            });
+            (action, payload)
+        } else {
+            // Normal batch: entry GTC limit + TP trigger + SL trigger.
+            let tp_str = format_price(take_profit);
+            let sl_str = format_price(stop_loss);
+            let close_is_buy = !is_buy;
+
+            let entry_order = mp_order(asset_index, is_buy, &price_str, &size_str, false, mp_limit_gtc());
+            let tp_order = mp_order(asset_index, close_is_buy, &tp_str, &size_str, true, mp_trigger(&tp_str, true));
+            let sl_order = mp_order(asset_index, close_is_buy, &sl_str, &size_str, true, mp_trigger(&sl_str, false));
+            let action = mp_action(vec![entry_order, tp_order, sl_order], "normalTpsl");
+            let (r, s, v) = sign_hl_order_batch(
+                self.private_key.expose_secret(), &action, nonce, self.vault_address,
+            )?;
+            let payload = serde_json::json!({
+                "action": {
+                    "type": "order",
+                    "orders": [
+                        {
+                            "a": asset_index, "b": is_buy,
+                            "p": price_str, "s": size_str, "r": false,
+                            "t": { "limit": { "tif": "Gtc" } }
+                        },
+                        {
+                            "a": asset_index, "b": close_is_buy,
+                            "p": tp_str, "s": size_str, "r": true,
+                            "t": { "trigger": { "isMarket": true, "triggerPx": tp_str, "tpsl": "tp" } }
+                        },
+                        {
+                            "a": asset_index, "b": close_is_buy,
+                            "p": sl_str, "s": size_str, "r": true,
+                            "t": { "trigger": { "isMarket": true, "triggerPx": sl_str, "tpsl": "sl" } }
+                        }
+                    ],
+                    "grouping": "normalTpsl",
+                    "builder": { "b": BUILDER_ADDRESS, "f": BUILDER_FEE }
+                },
+                "nonce": nonce,
+                "signature": { "r": r, "s": s, "v": v }
+            });
+            (action, payload)
+        };
+        let _ = &action; // used in signing above
 
         // ── Send ──────────────────────────────────────────────────────────────
         let response = self
@@ -966,18 +964,33 @@ impl Tool for HyperliquidTradeTool {
         })?;
 
         // Build a clean summary output (never echo the raw private key data)
-        let result = serde_json::json!({
-            "status": "order_submitted",
-            "side": if is_buy { "LONG" } else { "SHORT" },
-            "asset_index": asset_index,
-            "entry_price": price_str,
-            "take_profit": tp_str,
-            "stop_loss": sl_str,
-            "size": size_str,
-            "leverage": leverage,
-            "nonce": nonce,
-            "hyperliquid_response": resp_json
-        });
+        let result = if reduce_only {
+            serde_json::json!({
+                "status": "close_order_submitted",
+                "reduce_only": true,
+                "side": if is_buy { "BUY (closing SHORT)" } else { "SELL (closing LONG)" },
+                "asset_index": asset_index,
+                "price": price_str,
+                "size": size_str,
+                "nonce": nonce,
+                "hyperliquid_response": resp_json
+            })
+        } else {
+            let tp_str = format_price(take_profit);
+            let sl_str = format_price(stop_loss);
+            serde_json::json!({
+                "status": "order_submitted",
+                "side": if is_buy { "LONG" } else { "SHORT" },
+                "asset_index": asset_index,
+                "entry_price": price_str,
+                "take_profit": tp_str,
+                "stop_loss": sl_str,
+                "size": size_str,
+                "leverage": leverage,
+                "nonce": nonce,
+                "hyperliquid_response": resp_json
+            })
+        };
 
         Ok(ToolOutput::success(result, start.elapsed()))
     }

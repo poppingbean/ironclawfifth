@@ -97,32 +97,37 @@ pub async fn seed_hyperliquid_routine(store: &std::sync::Arc<dyn crate::db::Data
     // Canonical action — updated on every startup so the prompt stays in sync.
     let canonical_action = crate::agent::routine::RoutineAction::FullJob {
         title: "HyperLiquid BTC 15m trade".to_string(),
-        description: "Step 1: call hyperliquid_balance (no parameters). \
-            Check open_positions for any entry with coin='BTC'. \
-            If a BTC position exists, note its side (LONG or SHORT). \
-            Step 2: call hyperliquid_analyze (no parameters). \
-            Fetches 250 BTC candles per timeframe directly from HyperLiquid and returns a \
-            JSON object — read ALL fields directly from that result. \
-            Step 3: apply position conflict rules: \
-            (a) If no open BTC position — proceed normally to Step 4. \
-            (b) If open position side MATCHES the new signal direction \
-                (e.g. existing LONG and signal is also LONG) — STOP, do not trade. \
-                Pyramiding at high leverage is forbidden. \
-            (c) If open position side is OPPOSITE to the new signal \
-                (e.g. existing LONG but signal is SHORT, or vice versa) — STOP, do not trade. \
-                Instead report the reversal signal clearly: include signal, signal_score, \
-                limit_entry, take_profit, stop_loss, leverage, rr_ratio so the user can \
-                decide to manually close and re-enter. \
-            Step 4 (only when no open position): check trade conditions — only proceed if ALL: \
-            signal is LONG or SHORT (not NEUTRAL), is_buy is present, \
-            sl_pct_leveraged ≤ 0.40, rr_ratio ≥ 1.2. \
-            Step 5: call hyperliquid_trade with: \
-            is_buy (boolean from analysis), price (use limit_entry from analysis), \
-            take_profit (from analysis), stop_loss (from analysis), leverage (from analysis). \
-            Omit size — it is auto-calculated from effective_balance_usd. \
-            IMPORTANT — balance: this account uses HyperLiquid unified account mode. \
-            Spot USDC is the trading balance. Do NOT treat perp_account_equity_usd=0 as \
-            insufficient funds — always use effective_balance_usd from hyperliquid_balance."
+        description: "Step 1: call hyperliquid_balance. Note open_positions for any BTC entry: \
+            record its side (LONG/SHORT), size, entry_price, and unrealized_pnl. \
+            Step 2: call hyperliquid_analyze. Read ALL fields directly from the result. \
+            Step 3: apply position rules based on existing BTC position and new signal: \
+            \
+            (A) No open position — check conditions and trade: \
+                only proceed if signal is LONG or SHORT (not NEUTRAL), is_buy is present, \
+                sl_pct_leveraged <= 0.40, rr_ratio >= 1.2. \
+                Call hyperliquid_trade with is_buy, price=limit_entry, take_profit, \
+                stop_loss, leverage from analysis. Omit size (auto-calculated). \
+            \
+            (B) Open position SAME direction as new signal — SKIP. No pyramiding. \
+            \
+            (C) Open position OPPOSITE direction (reversal) — decide autonomously: \
+                Rule 1 — CLOSE AND REVERSE if the new signal is stronger/better: \
+                  - new signal_score distance from 50 > existing implied strength, OR \
+                  - existing position has unrealized_pnl <= 0 (at loss or breakeven), OR \
+                  - new signal rr_ratio >= 1.5 AND signal_score >= 70. \
+                  Action: call hyperliquid_trade with reduce_only=true, \
+                    is_buy=opposite of existing side, price=limit_entry from new analysis, \
+                    size=existing position size from open_positions. \
+                  Then immediately call hyperliquid_trade again with the new direction \
+                    (is_buy, price=limit_entry, take_profit, stop_loss, leverage). \
+                Rule 2 — KEEP existing position if it is clearly better: \
+                  - existing unrealized_pnl > 0 (profitable), AND \
+                  - new signal_score is weak (distance from 50 < 15), OR \
+                  - existing entry is already inside the new signal TP/SL range. \
+                  Action: skip — let the existing TP handle the exit. \
+            \
+            IMPORTANT — balance: unified account mode. Spot USDC is the trading balance. \
+            Do NOT treat perp_account_equity_usd=0 as insufficient funds — use effective_balance_usd."
             .to_string(),
         max_iterations: 10,
         tool_permissions: vec![

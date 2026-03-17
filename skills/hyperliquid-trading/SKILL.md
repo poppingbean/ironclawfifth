@@ -53,15 +53,39 @@ exists will uncontrollably increase size and stack redundant TP/SL triggers.
 
 | Existing position | New signal | Action |
 |-------------------|------------|--------|
-| None | LONG or SHORT | Proceed to analysis → trade |
-| LONG | LONG | **Skip** — no pyramiding at high leverage |
-| SHORT | SHORT | **Skip** — no pyramiding at high leverage |
-| LONG | SHORT | **Stop + notify** — reversal detected; report signal details so user can manually close and re-enter |
-| SHORT | LONG | **Stop + notify** — reversal detected; report signal details so user can manually close and re-enter |
-| Any | NEUTRAL | **Skip** — existing TP/SL handles the exit |
+| None | LONG or SHORT | Proceed → trade |
+| LONG | LONG | **Skip** — no pyramiding |
+| SHORT | SHORT | **Skip** — no pyramiding |
+| LONG or SHORT | NEUTRAL | **Skip** — let existing TP/SL handle exit |
+| LONG | SHORT (reversal) | Decide autonomously — see rules below |
+| SHORT | LONG (reversal) | Decide autonomously — see rules below |
 
-When reporting a reversal, always include: `signal`, `signal_score`, `limit_entry`,
-`take_profit`, `stop_loss`, `leverage`, `rr_ratio`.
+#### Reversal Decision Rules (autonomous)
+
+**Close and reverse** when the new signal is clearly better:
+- New `signal_score` distance from 50 is greater than the existing position's implied strength, **OR**
+- Existing `unrealized_pnl ≤ 0` (at loss or breakeven), **OR**
+- New `rr_ratio ≥ 1.5` AND `signal_score ≥ 70`
+
+**Keep existing position** when it is clearly better:
+- Existing `unrealized_pnl > 0` (profitable), **AND**
+- New signal is weak (score distance from 50 < 15), **OR**
+- Existing entry price is already inside the new signal's TP/SL range
+
+#### Closing a Position (`reduce_only`)
+
+To close before reversing, call `hyperliquid_trade` with:
+
+```
+hyperliquid_trade(
+  reduce_only  = true
+  is_buy       = opposite of existing side   # closing LONG → false, closing SHORT → true
+  price        = limit_entry from new analysis
+  size         = existing position size from open_positions
+)
+```
+
+Then immediately place the new entry order normally.
 
 ### Step 1 — Run Analysis
 
