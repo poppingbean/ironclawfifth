@@ -262,7 +262,52 @@ fn derive_eth_address(signing_key: &SigningKey) -> String {
     format!("0x{}", hex::encode(addr_bytes))
 }
 
+/// Fetch spot USDC balance from HyperLiquid spotClearinghouseState.
+async fn fetch_spot_usdc_balance(
+    client: &reqwest::Client,
+    address: &str,
+) -> Result<f64, ToolError> {
+    let payload = serde_json::json!({
+        "type": "spotClearinghouseState",
+        "user": address
+    });
+    let resp = client
+        .post(HL_INFO_URL)
+        .header("Content-Type", "application/json")
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| ToolError::ExternalService(format!("HL spot balance request failed: {e}")))?;
+
+    if !resp.status().is_success() {
+        return Ok(0.0);
+    }
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| ToolError::ExternalService(format!("HL spot balance parse error: {e}")))?;
+
+    // Response: {"balances": [{"coin": "USDC", "total": "77.21", ...}, ...]}
+    let usdc = json
+        .get("balances")
+        .and_then(|b| b.as_array())
+        .and_then(|arr| {
+            arr.iter().find(|entry| {
+                entry
+                    .get("coin")
+                    .and_then(|c| c.as_str())
+                    .map(|c| c.eq_ignore_ascii_case("USDC"))
+                    .unwrap_or(false)
+            })
+        })
+        .and_then(|entry| entry.get("total").and_then(|v| v.as_str()))
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    Ok(usdc)
+}
+
 /// Fetch the HyperLiquid account balance (USD) for the given address.
+/// Returns perp `accountValue`; if that is zero, falls back to spot USDC balance.
 async fn fetch_hl_balance(client: &reqwest::Client, address: &str) -> Result<f64, ToolError> {
     let payload = serde_json::json!({
         "type": "clearinghouseState",
@@ -291,15 +336,19 @@ async fn fetch_hl_balance(client: &reqwest::Client, address: &str) -> Result<f64
         ToolError::ExternalService(format!("Failed to parse HyperLiquid /info response: {e}"))
     })?;
 
-    json.get("marginSummary")
+    let perp_balance = json
+        .get("marginSummary")
         .and_then(|ms| ms.get("accountValue"))
         .and_then(|v| v.as_str())
         .and_then(|s| s.parse::<f64>().ok())
-        .ok_or_else(|| {
-            ToolError::ExternalService(
-                "Could not parse accountValue from HyperLiquid marginSummary".to_string(),
-            )
-        })
+        .unwrap_or(0.0);
+
+    if perp_balance > 0.0 {
+        return Ok(perp_balance);
+    }
+
+    // No perp margin deposited — fall back to spot USDC wallet
+    fetch_spot_usdc_balance(client, address).await
 }
 
 /// Return the fraction of account balance to allocate based on leverage tier.
@@ -500,6 +549,9 @@ impl Tool for HyperliquidBalanceTool {
             })
             .unwrap_or_default();
 
+        // Also fetch spot USDC so the user can see funds not yet in perp margin
+        let spot_usdc = fetch_spot_usdc_balance(&self.client, &address).await.unwrap_or(0.0);
+
         let result = serde_json::json!({
             "address": address,
             "account_equity_usd": account_value,
@@ -507,6 +559,8 @@ impl Tool for HyperliquidBalanceTool {
             "total_margin_used_usd": total_margin_used,
             "total_position_notional_usd": total_ntl_pos,
             "raw_usdc_balance_usd": total_raw_usd,
+            "spot_usdc_balance_usd": spot_usdc,
+            "effective_balance_usd": if account_value > 0.0 { account_value } else { spot_usdc },
             "open_positions": positions,
             "queried_at": chrono::Utc::now().to_rfc3339()
         });
