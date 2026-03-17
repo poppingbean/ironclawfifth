@@ -38,7 +38,20 @@ HyperLiquid. Always run analysis before placing an order. Never skip signal revi
 
 ---
 
-## Workflow
+## Automated Routines
+
+Two cron routines run every 15 minutes:
+
+| Routine | Schedule | Tools | Purpose |
+|---------|----------|-------|---------|
+| `hyperliquid-btc-15m` | T+15s | `hyperliquid_analyze`, `memory_write` | Fetch signal, store to `btc/signal/latest` |
+| `hyperliquid-btc-trader` | T+45s | `memory_read`, `hyperliquid_balance`, `hyperliquid_trade` | Read signal, check positions, trade |
+
+Routine 2 fires 30 seconds after Routine 1 so the signal is always fresh before trading decisions.
+
+---
+
+## Manual Workflow
 
 ### Step 0 — Check for Open Position (mandatory)
 

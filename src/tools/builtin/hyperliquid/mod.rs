@@ -7,6 +7,15 @@
 //! - [`HyperliquidTradeTool`]: places a GTC limit order on HyperLiquid perpetuals
 //!   with EIP-712 signing and the required builder fee tag.
 //!
+//! ## Routines
+//!
+//! Two complementary cron routines are seeded at startup:
+//!
+//! - `hyperliquid-btc-15m` (T+15s): runs `hyperliquid_analyze` and writes the
+//!   signal to workspace memory at `btc/signal/latest`.
+//! - `hyperliquid-btc-trader` (T+45s): reads the stored signal, checks open
+//!   positions via `hyperliquid_balance`, and places or manages orders.
+//!
 //! ## Environment
 //!
 //! `HYPERLIQUID_PRIVATE_KEY` — hex-encoded secp256k1 private key (with or without `0x`
@@ -23,9 +32,6 @@ pub use analysis::HyperliquidAnalyzeTool;
 pub use trading::{HyperliquidBalanceTool, HyperliquidTradeTool};
 
 /// Cancel any active (non-terminal) jobs linked to previous runs of a routine.
-///
-/// Called at startup before rescheduling so stale `Pending`/`InProgress`/`Stuck`
-/// jobs from the previous process lifetime are cleaned up.
 async fn cancel_active_routine_jobs(
     store: &std::sync::Arc<dyn crate::db::Database>,
     routine_id: uuid::Uuid,
@@ -53,7 +59,7 @@ async fn cancel_active_routine_jobs(
         };
 
         if !ctx.state.is_active() {
-            continue; // already terminal — nothing to do
+            continue;
         }
 
         if let Err(e) = store
@@ -67,121 +73,61 @@ async fn cancel_active_routine_jobs(
     }
 }
 
-/// Seed (or reschedule) the HyperLiquid 15-minute trading routine at startup.
-///
-/// - **First run**: creates a `full_job` cron routine named `"hyperliquid-btc-15m"`
-///   that fires at second 15 of every 15th minute (`15 */15 * * * *`).
-/// - **Subsequent startups**: cancels any active jobs from previous runs, then
-///   updates `next_fire_at` to the next future fire time so the ticker picks it
-///   up immediately without waiting for a stale past timestamp.
-///
-/// Only active when `HYPERLIQUID_PRIVATE_KEY` is set — if the trade tool isn't
-/// registered the routine would only be able to analyze, never place orders.
-pub async fn seed_hyperliquid_routine(store: &std::sync::Arc<dyn crate::db::Database>) {
-    if std::env::var("HYPERLIQUID_PRIVATE_KEY").is_err() {
-        return;
-    }
+/// Seed or sync a single routine. Creates on first run; updates prompt and reschedules on
+/// subsequent startups so the context always reflects the latest code.
+async fn seed_or_sync_routine(
+    store: &std::sync::Arc<dyn crate::db::Database>,
+    name: &str,
+    description: &str,
+    schedule: &str,
+    action: crate::agent::routine::RoutineAction,
+    cooldown_secs: u64,
+) {
+    let user_id = "default";
 
-    const ROUTINE_NAME: &str = "hyperliquid-btc-15m";
-    const USER_ID: &str = "default";
-    const SCHEDULE: &str = "15 */15 * * * *";
-
-    let next_fire = match crate::agent::routine::next_cron_fire(SCHEDULE, None) {
+    let next_fire = match crate::agent::routine::next_cron_fire(schedule, None) {
         Ok(t) => t,
         Err(e) => {
-            tracing::warn!("Failed to compute next fire for HyperLiquid routine: {}", e);
+            tracing::warn!("Failed to compute next fire for routine '{}': {}", name, e);
             return;
         }
     };
 
-    // Canonical action — updated on every startup so the prompt stays in sync.
-    let canonical_action = crate::agent::routine::RoutineAction::FullJob {
-        title: "HyperLiquid BTC 15m trade".to_string(),
-        description: "Step 1: call hyperliquid_balance. Note open_positions for any BTC entry: \
-            record its side (LONG/SHORT), size, entry_price, and unrealized_pnl. \
-            Step 2: call hyperliquid_analyze. Read ALL fields directly from the result. \
-            Step 3: apply position rules based on existing BTC position and new signal: \
-            \
-            (A) No open position — check conditions and trade: \
-                only proceed if signal is LONG or SHORT (not NEUTRAL), is_buy is present, \
-                sl_pct_leveraged <= 0.40, rr_ratio >= 1.2. \
-                Call hyperliquid_trade with is_buy, price=limit_entry, take_profit, \
-                stop_loss, leverage from analysis. Omit size (auto-calculated). \
-            \
-            (B) Open position SAME direction as new signal — SKIP. No pyramiding. \
-            \
-            (C) Open position OPPOSITE direction (reversal) — decide autonomously: \
-                Rule 1 — CLOSE AND REVERSE if the new signal is stronger/better: \
-                  - new signal_score distance from 50 > existing implied strength, OR \
-                  - existing position has unrealized_pnl <= 0 (at loss or breakeven), OR \
-                  - new signal rr_ratio >= 1.5 AND signal_score >= 70. \
-                  Action: call hyperliquid_trade with reduce_only=true, \
-                    is_buy=opposite of existing side, price=limit_entry from new analysis, \
-                    size=existing position size from open_positions. \
-                  Then immediately call hyperliquid_trade again with the new direction \
-                    (is_buy, price=limit_entry, take_profit, stop_loss, leverage). \
-                Rule 2 — KEEP existing position if it is clearly better: \
-                  - existing unrealized_pnl > 0 (profitable), AND \
-                  - new signal_score is weak (distance from 50 < 15), OR \
-                  - existing entry is already inside the new signal TP/SL range. \
-                  Action: skip — let the existing TP handle the exit. \
-            \
-            IMPORTANT — balance: unified account mode. Spot USDC is the trading balance. \
-            Do NOT treat perp_account_equity_usd=0 as insufficient funds — use effective_balance_usd."
-            .to_string(),
-        max_iterations: 10,
-        tool_permissions: vec![
-            "hyperliquid_analyze".to_string(),
-            "hyperliquid_balance".to_string(),
-            "hyperliquid_trade".to_string(),
-        ],
-    };
-    let canonical_description = "Analyze BTC perpetuals and place a trade if signal is clear \
-        (every 15 min at T+15s). Uses unified account — spot USDC is the trading balance."
-        .to_string();
-
-    match store.get_routine_by_name(USER_ID, ROUTINE_NAME).await {
+    match store.get_routine_by_name(user_id, name).await {
         Ok(Some(existing)) => {
-            // Cancel stale jobs from the previous process lifetime.
             cancel_active_routine_jobs(store, existing.id).await;
 
-            // Reschedule and sync prompt/action to latest code on every startup.
             let mut updated = existing;
             updated.next_fire_at = next_fire;
-            updated.description = canonical_description;
-            updated.action = canonical_action;
+            updated.description = description.to_string();
+            updated.action = action;
             updated.updated_at = chrono::Utc::now();
 
             match store.update_routine(&updated).await {
-                Ok(()) => tracing::info!(
-                    "Rescheduled and synced HyperLiquid routine '{}' (next fire: {:?})",
-                    ROUTINE_NAME,
-                    updated.next_fire_at
-                ),
-                Err(e) => tracing::warn!("Failed to reschedule HyperLiquid routine: {}", e),
+                Ok(()) => tracing::info!("Synced routine '{}' (next: {:?})", name, updated.next_fire_at),
+                Err(e) => tracing::warn!("Failed to sync routine '{}': {}", name, e),
             }
         }
         Ok(None) => {
-            // First run — create the routine.
             let routine = crate::agent::routine::Routine {
                 id: uuid::Uuid::new_v4(),
-                name: ROUTINE_NAME.to_string(),
-                description: canonical_description,
-                user_id: USER_ID.to_string(),
+                name: name.to_string(),
+                description: description.to_string(),
+                user_id: user_id.to_string(),
                 enabled: true,
                 trigger: crate::agent::routine::Trigger::Cron {
-                    schedule: SCHEDULE.to_string(),
+                    schedule: schedule.to_string(),
                     timezone: None,
                 },
-                action: canonical_action,
+                action,
                 guardrails: crate::agent::routine::RoutineGuardrails {
-                    cooldown: std::time::Duration::from_secs(600),
+                    cooldown: std::time::Duration::from_secs(cooldown_secs),
                     max_concurrent: 1,
                     dedup_window: None,
                 },
                 notify: crate::agent::routine::NotifyConfig {
                     channel: None,
-                    user: USER_ID.to_string(),
+                    user: user_id.to_string(),
                     on_attention: true,
                     on_failure: true,
                     on_success: false,
@@ -196,16 +142,89 @@ pub async fn seed_hyperliquid_routine(store: &std::sync::Arc<dyn crate::db::Data
             };
 
             match store.create_routine(&routine).await {
-                Ok(()) => tracing::info!(
-                    "Seeded HyperLiquid routine '{}' (next fire: {:?})",
-                    ROUTINE_NAME,
-                    routine.next_fire_at
-                ),
-                Err(e) => tracing::warn!("Failed to seed HyperLiquid routine: {}", e),
+                Ok(()) => tracing::info!("Seeded routine '{}' (next: {:?})", name, routine.next_fire_at),
+                Err(e) => tracing::warn!("Failed to seed routine '{}': {}", name, e),
             }
         }
-        Err(e) => {
-            tracing::warn!("Failed to check for HyperLiquid routine: {}", e);
-        }
+        Err(e) => tracing::warn!("Failed to check routine '{}': {}", name, e),
     }
+}
+
+/// Seed the two HyperLiquid cron routines at startup.
+///
+/// **Routine 1 — `hyperliquid-btc-15m`** (fires at T+15s every 15 min):
+///   Runs `hyperliquid_analyze` and writes the full signal JSON to workspace
+///   memory at path `btc/signal/latest`. Simple, fast, no trading logic.
+///
+/// **Routine 2 — `hyperliquid-btc-trader`** (fires at T+45s every 15 min):
+///   Reads the stored signal, checks open BTC positions via `hyperliquid_balance`,
+///   and places or manages orders based on position state and signal quality.
+///   Fires 30 seconds after Routine 1 so the signal is always fresh.
+pub async fn seed_hyperliquid_routine(store: &std::sync::Arc<dyn crate::db::Database>) {
+    if std::env::var("HYPERLIQUID_PRIVATE_KEY").is_err() {
+        return;
+    }
+
+    // ── Routine 1: Analyze & store signal ────────────────────────────────────
+    seed_or_sync_routine(
+        store,
+        "hyperliquid-btc-15m",
+        "Fetch BTC multi-timeframe signal from HyperLiquid and store it in memory (every 15 min at T+15s).",
+        "15 */15 * * * *",
+        crate::agent::routine::RoutineAction::FullJob {
+            title: "HyperLiquid BTC signal analysis".to_string(),
+            description: "Call hyperliquid_analyze (no parameters). \
+                Then call memory_write with path='btc/signal/latest' and the FULL \
+                JSON result as the content. Do nothing else."
+                .to_string(),
+            max_iterations: 3,
+            tool_permissions: vec![
+                "hyperliquid_analyze".to_string(),
+                "memory_write".to_string(),
+            ],
+        },
+        600,
+    )
+    .await;
+
+    // ── Routine 2: Read signal & trade ────────────────────────────────────────
+    seed_or_sync_routine(
+        store,
+        "hyperliquid-btc-trader",
+        "Read latest BTC signal from memory and place order if conditions are met (every 15 min at T+45s).",
+        "45 */15 * * * *",
+        crate::agent::routine::RoutineAction::FullJob {
+            title: "HyperLiquid BTC order placement".to_string(),
+            description: "1. Call memory_read with path='btc/signal/latest'. \
+                Parse the signal fields: signal, is_buy, signal_score, limit_entry, \
+                take_profit, stop_loss, leverage, rr_ratio, sl_pct_leveraged. \
+                2. Call hyperliquid_balance. Note open_positions for coin=BTC \
+                (record side, size, entry_price, unrealized_pnl). \
+                Also note effective_balance_usd — this is the correct trading balance \
+                even when perp_account_equity_usd is 0 (unified account). \
+                3. Act based on position state: \
+                NO open BTC position: trade if signal=LONG or SHORT AND \
+                  sl_pct_leveraged<=0.50 AND rr_ratio>=1.2. \
+                  Call hyperliquid_trade(is_buy, price=limit_entry, take_profit, \
+                  stop_loss, leverage). Omit size (auto-calculated). \
+                SAME direction as open position: skip. \
+                OPPOSITE direction (reversal): \
+                  CLOSE AND REVERSE if unrealized_pnl<=0, OR \
+                    (rr_ratio>=1.5 AND signal_score>=70). \
+                    Call hyperliquid_trade(reduce_only=true, is_buy=opposite_of_existing, \
+                    price=limit_entry, size=existing_size). \
+                    Then call hyperliquid_trade(is_buy, price=limit_entry, \
+                    take_profit, stop_loss, leverage). \
+                  KEEP existing if unrealized_pnl>0 AND signal is weak (score dist <15)."
+                .to_string(),
+            max_iterations: 6,
+            tool_permissions: vec![
+                "memory_read".to_string(),
+                "hyperliquid_balance".to_string(),
+                "hyperliquid_trade".to_string(),
+            ],
+        },
+        600,
+    )
+    .await;
 }
