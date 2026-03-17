@@ -367,21 +367,22 @@ fn score_indicators(ind: &IndicatorSet, close: f64, obv_up: bool) -> f64 {
 // ── Leverage / signal helpers ─────────────────────────────────────────────────
 
 /// Map signal score to leverage using symmetric distance from 50.
+/// HyperLiquid BTC max leverage is ×40.
 ///
 /// | Distance from 50 | LONG score | SHORT score | Leverage |
 /// |------------------|------------|-------------|----------|
-/// | ≥ 30             | ≥ 80       | ≤ 20        | ×100     |
-/// | 20–29            | 70–79      | 21–30       | ×75      |
-/// | 10–19            | 60–69      | 31–40       | ×50      |
-/// | < 10             | —          | —           | ×25 (neutral-adjacent) |
+/// | ≥ 30             | ≥ 80       | ≤ 20        | ×40      |
+/// | 20–29            | 70–79      | 21–30       | ×30      |
+/// | 10–19            | 60–69      | 31–40       | ×20      |
+/// | < 10             | —          | —           | neutral  |
 fn leverage_from_score(score: f64) -> u32 {
     let dist = (score - 50.0).abs();
     if dist >= 30.0 {
-        100
+        40
     } else if dist >= 20.0 {
-        75
+        30
     } else {
-        50 // dist 10-19 (signal band but below x75 threshold)
+        20 // dist 10-19 (signal band but below x30 threshold)
     }
 }
 
@@ -410,7 +411,7 @@ impl Tool for HyperliquidAnalyzeTool {
         computes 14 technical indicators per timeframe (RSI, MACD, Bollinger Bands, \
         EMA50/200, ATR, Stochastic, Williams %R, CCI, ADX, OBV, VWAP, Ichimoku, \
         Fibonacci retracements), and returns a LONG/SHORT/NEUTRAL signal with \
-        entry price, take-profit, stop-loss, and leverage recommendation (×50/×75/×100). \
+        entry price, take-profit, stop-loss, and leverage recommendation (×20/×30/×40 — HL max). \
         4h timeframe drives trend direction (weighted ×0.45); 1h ATR sizes the SL/TP. \
         No parameters required — always analyzes BTC perpetual."
     }
@@ -615,9 +616,9 @@ impl Tool for HyperliquidAnalyzeTool {
             ToolError::ExecutionFailed(format!("Failed to serialize analysis: {e}"))
         })?;
 
-        // Append signal to workspace history file (fire-and-forget).
+        // Persist signal to workspace — fire-and-forget.
         if let Some(ref ws) = self.workspace {
-            let entry = format!(
+            let history_entry = format!(
                 "\n## {}\n\
                 - **Signal**: {} (score {:.1})\n\
                 - **Entry**: ${:.1}  |  Limit: ${:.1}\n\
@@ -641,9 +642,14 @@ impl Tool for HyperliquidAnalyzeTool {
                 output.timeframes.h1.score,
                 output.timeframes.h4.score,
             );
+            // Serialise the full signal for the trader routine to consume.
+            let signal_json = serde_json::to_string(&output).unwrap_or_default();
             let ws = Arc::clone(ws);
             tokio::spawn(async move {
-                if let Err(e) = ws.append("hyperliquid/signal-history.md", &entry).await {
+                if let Err(e) = ws.write("btc/signal/latest", &signal_json).await {
+                    tracing::warn!("Failed to write btc/signal/latest: {}", e);
+                }
+                if let Err(e) = ws.append("hyperliquid/signal-history.md", &history_entry).await {
                     tracing::warn!("Failed to write HyperLiquid signal history: {}", e);
                 }
             });
@@ -682,19 +688,19 @@ mod tests {
     #[test]
     fn test_leverage_from_score_boundaries() {
         // Symmetric: distance from 50 determines tier.
-        // dist ≥ 30 → ×100, dist ≥ 20 → ×75, dist 10-19 → ×50
-        assert_eq!(leverage_from_score(20.0), 100); // dist 30 → ×100
-        assert_eq!(leverage_from_score(19.9), 100); // dist 30.1 → ×100
-        assert_eq!(leverage_from_score(21.0), 75);  // dist 29 → ×75
-        assert_eq!(leverage_from_score(30.0), 75);  // dist 20 → ×75
-        assert_eq!(leverage_from_score(31.0), 50);  // dist 19 → ×50
-        assert_eq!(leverage_from_score(40.0), 50);  // dist 10 → ×50
-        assert_eq!(leverage_from_score(60.0), 50);  // dist 10 → ×50
-        assert_eq!(leverage_from_score(69.0), 50);  // dist 19 → ×50
-        assert_eq!(leverage_from_score(70.0), 75);  // dist 20 → ×75
-        assert_eq!(leverage_from_score(79.9), 75);  // dist 29.9 → ×75
-        assert_eq!(leverage_from_score(80.0), 100); // dist 30 → ×100
-        assert_eq!(leverage_from_score(100.0), 100);
+        // dist ≥ 30 → ×40, dist ≥ 20 → ×30, dist 10-19 → ×20 (HL max is ×40)
+        assert_eq!(leverage_from_score(20.0), 40);  // dist 30 → ×40
+        assert_eq!(leverage_from_score(19.9), 40);  // dist 30.1 → ×40
+        assert_eq!(leverage_from_score(21.0), 30);  // dist 29 → ×30
+        assert_eq!(leverage_from_score(30.0), 30);  // dist 20 → ×30
+        assert_eq!(leverage_from_score(31.0), 20);  // dist 19 → ×20
+        assert_eq!(leverage_from_score(40.0), 20);  // dist 10 → ×20
+        assert_eq!(leverage_from_score(60.0), 20);  // dist 10 → ×20
+        assert_eq!(leverage_from_score(69.0), 20);  // dist 19 → ×20
+        assert_eq!(leverage_from_score(70.0), 30);  // dist 20 → ×30
+        assert_eq!(leverage_from_score(79.9), 30);  // dist 29.9 → ×30
+        assert_eq!(leverage_from_score(80.0), 40);  // dist 30 → ×40
+        assert_eq!(leverage_from_score(100.0), 40);
     }
 
     #[test]

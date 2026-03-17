@@ -174,21 +174,13 @@ pub async fn seed_hyperliquid_routine(store: &std::sync::Arc<dyn crate::db::Data
         crate::agent::routine::RoutineAction::FullJob {
             title: "HyperLiquid BTC signal analysis".to_string(),
             description: "\
-                FIRST ACTION: call hyperliquid_analyze now (no parameters). \
-                Do not call any other tool first. Do not call memory_write before hyperliquid_analyze returns.\n\
-                \n\
-                After hyperliquid_analyze returns its JSON result, immediately call memory_write with:\n\
-                  path    = 'btc/signal/latest'\n\
-                  content = the EXACT raw JSON string returned by hyperliquid_analyze\n\
-                Do not summarize, paraphrase, or modify the JSON. Copy it verbatim.\n\
-                Do not write to any other path (not daily/, not logs/, nothing else).\n\
-                \n\
-                Those are the only two tool calls for this job. Stop after memory_write succeeds."
+                Call hyperliquid_analyze (no parameters).\n\
+                The tool automatically saves the signal to memory. No other tool calls needed.\n\
+                Stop as soon as hyperliquid_analyze returns."
                 .to_string(),
             max_iterations: 3,
             tool_permissions: vec![
                 "hyperliquid_analyze".to_string(),
-                "memory_write".to_string(),
             ],
         },
         600,
@@ -204,53 +196,28 @@ pub async fn seed_hyperliquid_routine(store: &std::sync::Arc<dyn crate::db::Data
         crate::agent::routine::RoutineAction::FullJob {
             title: "HyperLiquid BTC order placement".to_string(),
             description: "\
-                Goal: read the stored signal and manage BTC perpetual positions on HyperLiquid.\n\
+                Call memory_read(path='btc/signal/latest') and hyperliquid_balance() simultaneously.\n\
                 \n\
-                Step 1: call memory_read with path='btc/signal/latest'.\n\
-                If the result has found=false or content=null, stop immediately —\n\
-                the analysis routine has not run yet. Do not call any other tool.\n\
-                Otherwise parse the content and extract:\n\
-                signal, is_buy, signal_score, limit_entry, take_profit,\n\
-                stop_loss, leverage, rr_ratio, sl_pct_leveraged.\n\
+                If memory_read returns found=false: stop, no signal available yet.\n\
+                Extract from signal: signal, is_buy, signal_score, limit_entry, take_profit, stop_loss, leverage, rr_ratio, sl_pct_leveraged.\n\
+                From balance: effective_balance_usd (USE THIS — perp=0 on unified accounts is NOT an error), open_positions.\n\
                 \n\
-                Step 2: call hyperliquid_balance (no parameters).\n\
-                Key fields:\n\
-                  effective_balance_usd    — USE THIS for all balance decisions.\n\
-                                            On unified accounts perp_account_equity_usd\n\
-                                            may be 0 even with funds — that is NOT an error.\n\
-                  open_positions           — list of {coin, side, size, entry_price, unrealized_pnl}\n\
-                Check for any entry with coin=BTC.\n\
+                Find any open_positions entry with coin=BTC. Then immediately act:\n\
                 \n\
-                Step 3: act based on the BTC position state:\n\
+                NO BTC position + signal=LONG or SHORT + sl_pct_leveraged<=0.50 + rr_ratio>=1.2:\n\
+                  call hyperliquid_trade(is_buy, price=limit_entry, take_profit, stop_loss, leverage). Omit size.\n\
                 \n\
-                A) NO open BTC position:\n\
-                   Trade only if ALL: signal=LONG or SHORT, sl_pct_leveraged<=0.50, rr_ratio>=1.2.\n\
-                   Call hyperliquid_trade(\n\
-                     is_buy=<is_buy from signal>, price=<limit_entry>,\n\
-                     take_profit=<take_profit>, stop_loss=<stop_loss>, leverage=<leverage>\n\
-                   ). Omit size — auto-calculated from effective_balance_usd.\n\
+                BTC position exists, SAME direction as signal: done, no action.\n\
                 \n\
-                B) Open position SAME direction as signal: skip, do nothing.\n\
-                   (e.g. existing LONG and signal=LONG — no pyramiding at high leverage.)\n\
+                BTC position exists, OPPOSITE direction (reversal):\n\
+                  if unrealized_pnl<=0 OR (rr_ratio>=1.5 AND signal_score>=70):\n\
+                    call hyperliquid_trade(reduce_only=true, is_buy=<opposite_of_existing>, price=limit_entry, size=<existing_size>)\n\
+                    then call hyperliquid_trade(is_buy, price=limit_entry, take_profit, stop_loss, leverage)\n\
+                  else if unrealized_pnl>0 AND abs(signal_score-50)<15: done, keep existing position.\n\
                 \n\
-                C) Open position OPPOSITE direction (reversal signal):\n\
-                   CLOSE AND REVERSE if any condition is true:\n\
-                     - unrealized_pnl <= 0 (at loss or breakeven)\n\
-                     - rr_ratio >= 1.5 AND signal_score >= 70\n\
-                   To close: call hyperliquid_trade(\n\
-                     reduce_only=true,\n\
-                     is_buy=<opposite of existing side>,  # closing LONG->false, SHORT->true\n\
-                     price=<limit_entry from signal>,\n\
-                     size=<size from open_positions>\n\
-                   ).\n\
-                   Then open new: call hyperliquid_trade(\n\
-                     is_buy=<is_buy from signal>, price=<limit_entry>,\n\
-                     take_profit=<take_profit>, stop_loss=<stop_loss>, leverage=<leverage>\n\
-                   ).\n\
-                   KEEP existing (skip) if: unrealized_pnl > 0\n\
-                     AND signal_score distance from 50 < 15 (weak signal)."
+                signal=NEUTRAL or is_buy=null: done, no action."
                 .to_string(),
-            max_iterations: 6,
+            max_iterations: 4,
             tool_permissions: vec![
                 "memory_read".to_string(),
                 "hyperliquid_balance".to_string(),
