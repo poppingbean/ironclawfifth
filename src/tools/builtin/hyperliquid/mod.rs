@@ -216,10 +216,10 @@ pub async fn seed_hyperliquid_routine(store: &std::sync::Arc<dyn crate::db::Data
             description: "\
                 Goal: read the stored signal and manage BTC perpetual positions on HyperLiquid.\n\
                 \n\
-                Step 1: call memory_search with query='btc/signal/latest'.\n\
-                If the result is empty or has no items, stop immediately — the analysis\n\
-                routine has not run yet. Do not call any other tool.\n\
-                Otherwise take the first result's content and extract:\n\
+                Step 1: call memory_read with path='btc/signal/latest'.\n\
+                If the result has found=false or content=null, stop immediately —\n\
+                the analysis routine has not run yet. Do not call any other tool.\n\
+                Otherwise parse the content and extract:\n\
                 signal, is_buy, signal_score, limit_entry, take_profit,\n\
                 stop_loss, leverage, rr_ratio, sl_pct_leveraged.\n\
                 \n\
@@ -262,7 +262,7 @@ pub async fn seed_hyperliquid_routine(store: &std::sync::Arc<dyn crate::db::Data
                 .to_string(),
             max_iterations: 6,
             tool_permissions: vec![
-                "memory_search".to_string(),
+                "memory_read".to_string(),
                 "hyperliquid_balance".to_string(),
                 "hyperliquid_trade".to_string(),
             ],
