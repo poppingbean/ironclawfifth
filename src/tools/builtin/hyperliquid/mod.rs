@@ -169,13 +169,31 @@ pub async fn seed_hyperliquid_routine(store: &std::sync::Arc<dyn crate::db::Data
     seed_or_sync_routine(
         store,
         "hyperliquid-btc-15m",
-        "Fetch BTC multi-timeframe signal from HyperLiquid and store it in memory (every 15 min at T+15s).",
+        "Fetch BTC multi-timeframe signal from HyperLiquid and store to memory (every 15 min at T+15s).",
         "15 */15 * * * *",
         crate::agent::routine::RoutineAction::FullJob {
             title: "HyperLiquid BTC signal analysis".to_string(),
-            description: "Call hyperliquid_analyze (no parameters). \
-                Then call memory_write with path='btc/signal/latest' and the FULL \
-                JSON result as the content. Do nothing else."
+            description: "\
+                Goal: fetch the latest BTC trading signal and persist it for the trader routine.\n\
+                \n\
+                Step 1: call hyperliquid_analyze (no parameters).\n\
+                It fetches 250 BTC candles per timeframe directly from HyperLiquid (15m, 1h, 4h)\n\
+                and returns a JSON object with these fields:\n\
+                  signal          — LONG / SHORT / NEUTRAL\n\
+                  is_buy          — true (LONG) or false (SHORT) or null (NEUTRAL)\n\
+                  signal_score    — 0-100; >=60=LONG, <=40=SHORT, 41-59=NEUTRAL\n\
+                  limit_entry     — limit order price (0.4% buffer already applied)\n\
+                  take_profit     — TP trigger price\n\
+                  stop_loss       — SL trigger price\n\
+                  leverage        — 50 / 75 / 100 based on score distance from 50\n\
+                  rr_ratio        — reward:risk ratio\n\
+                  sl_pct_leveraged — % of margin at risk\n\
+                  atr_1h, atr_4h  — ATR values for context\n\
+                \n\
+                Step 2: call memory_write with path='btc/signal/latest'\n\
+                and the FULL JSON result from Step 1 as the content string.\n\
+                \n\
+                Do nothing else. Do not place orders. Do not evaluate the signal."
                 .to_string(),
             max_iterations: 3,
             tool_permissions: vec![
@@ -195,27 +213,50 @@ pub async fn seed_hyperliquid_routine(store: &std::sync::Arc<dyn crate::db::Data
         "45 */15 * * * *",
         crate::agent::routine::RoutineAction::FullJob {
             title: "HyperLiquid BTC order placement".to_string(),
-            description: "1. Call memory_read with path='btc/signal/latest'. \
-                Parse the signal fields: signal, is_buy, signal_score, limit_entry, \
-                take_profit, stop_loss, leverage, rr_ratio, sl_pct_leveraged. \
-                2. Call hyperliquid_balance. Note open_positions for coin=BTC \
-                (record side, size, entry_price, unrealized_pnl). \
-                Also note effective_balance_usd — this is the correct trading balance \
-                even when perp_account_equity_usd is 0 (unified account). \
-                3. Act based on position state: \
-                NO open BTC position: trade if signal=LONG or SHORT AND \
-                  sl_pct_leveraged<=0.50 AND rr_ratio>=1.2. \
-                  Call hyperliquid_trade(is_buy, price=limit_entry, take_profit, \
-                  stop_loss, leverage). Omit size (auto-calculated). \
-                SAME direction as open position: skip. \
-                OPPOSITE direction (reversal): \
-                  CLOSE AND REVERSE if unrealized_pnl<=0, OR \
-                    (rr_ratio>=1.5 AND signal_score>=70). \
-                    Call hyperliquid_trade(reduce_only=true, is_buy=opposite_of_existing, \
-                    price=limit_entry, size=existing_size). \
-                    Then call hyperliquid_trade(is_buy, price=limit_entry, \
-                    take_profit, stop_loss, leverage). \
-                  KEEP existing if unrealized_pnl>0 AND signal is weak (score dist <15)."
+            description: "\
+                Goal: read the stored signal and manage BTC perpetual positions on HyperLiquid.\n\
+                \n\
+                Step 1: call memory_read with path='btc/signal/latest'.\n\
+                Extract: signal, is_buy, signal_score, limit_entry, take_profit,\n\
+                stop_loss, leverage, rr_ratio, sl_pct_leveraged.\n\
+                If no signal is found, stop — the analysis routine has not run yet.\n\
+                \n\
+                Step 2: call hyperliquid_balance (no parameters).\n\
+                Key fields:\n\
+                  effective_balance_usd    — USE THIS for all balance decisions.\n\
+                                            On unified accounts perp_account_equity_usd\n\
+                                            may be 0 even with funds — that is NOT an error.\n\
+                  open_positions           — list of {coin, side, size, entry_price, unrealized_pnl}\n\
+                Check for any entry with coin=BTC.\n\
+                \n\
+                Step 3: act based on the BTC position state:\n\
+                \n\
+                A) NO open BTC position:\n\
+                   Trade only if ALL: signal=LONG or SHORT, sl_pct_leveraged<=0.50, rr_ratio>=1.2.\n\
+                   Call hyperliquid_trade(\n\
+                     is_buy=<is_buy from signal>, price=<limit_entry>,\n\
+                     take_profit=<take_profit>, stop_loss=<stop_loss>, leverage=<leverage>\n\
+                   ). Omit size — auto-calculated from effective_balance_usd.\n\
+                \n\
+                B) Open position SAME direction as signal: skip, do nothing.\n\
+                   (e.g. existing LONG and signal=LONG — no pyramiding at high leverage.)\n\
+                \n\
+                C) Open position OPPOSITE direction (reversal signal):\n\
+                   CLOSE AND REVERSE if any condition is true:\n\
+                     - unrealized_pnl <= 0 (at loss or breakeven)\n\
+                     - rr_ratio >= 1.5 AND signal_score >= 70\n\
+                   To close: call hyperliquid_trade(\n\
+                     reduce_only=true,\n\
+                     is_buy=<opposite of existing side>,  # closing LONG->false, SHORT->true\n\
+                     price=<limit_entry from signal>,\n\
+                     size=<size from open_positions>\n\
+                   ).\n\
+                   Then open new: call hyperliquid_trade(\n\
+                     is_buy=<is_buy from signal>, price=<limit_entry>,\n\
+                     take_profit=<take_profit>, stop_loss=<stop_loss>, leverage=<leverage>\n\
+                   ).\n\
+                   KEEP existing (skip) if: unrealized_pnl > 0\n\
+                     AND signal_score distance from 50 < 15 (weak signal)."
                 .to_string(),
             max_iterations: 6,
             tool_permissions: vec![
