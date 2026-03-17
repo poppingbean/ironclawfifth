@@ -11,9 +11,9 @@
 //!
 //! Two complementary cron routines are seeded at startup:
 //!
-//! - `hyperliquid-btc-15m` (T+15s): runs `hyperliquid_analyze` and writes the
+//! - `hyperliquid-btc-15m` (T+0s): runs `hyperliquid_analyze` and writes the
 //!   signal to workspace memory at `btc/signal/latest`.
-//! - `hyperliquid-btc-trader` (T+45s): reads the stored signal, checks open
+//! - `hyperliquid-btc-trader` (T+3 min): reads the stored signal, checks open
 //!   positions via `hyperliquid_balance`, and places or manages orders.
 //!
 //! ## Environment
@@ -152,14 +152,14 @@ async fn seed_or_sync_routine(
 
 /// Seed the two HyperLiquid cron routines at startup.
 ///
-/// **Routine 1 — `hyperliquid-btc-15m`** (fires at T+15s every 15 min):
+/// **Routine 1 — `hyperliquid-btc-15m`** (fires at minutes 0,15,30,45):
 ///   Runs `hyperliquid_analyze` and writes the full signal JSON to workspace
 ///   memory at path `btc/signal/latest`. Simple, fast, no trading logic.
 ///
-/// **Routine 2 — `hyperliquid-btc-trader`** (fires at T+45s every 15 min):
+/// **Routine 2 — `hyperliquid-btc-trader`** (fires at minutes 3,18,33,48):
 ///   Reads the stored signal, checks open BTC positions via `hyperliquid_balance`,
 ///   and places or manages orders based on position state and signal quality.
-///   Fires 30 seconds after Routine 1 so the signal is always fresh.
+///   Fires 3 minutes after Routine 1 so the signal is always fresh.
 pub async fn seed_hyperliquid_routine(store: &std::sync::Arc<dyn crate::db::Database>) {
     if std::env::var("HYPERLIQUID_PRIVATE_KEY").is_err() {
         return;
@@ -169,8 +169,8 @@ pub async fn seed_hyperliquid_routine(store: &std::sync::Arc<dyn crate::db::Data
     seed_or_sync_routine(
         store,
         "hyperliquid-btc-15m",
-        "Fetch BTC multi-timeframe signal from HyperLiquid and store to memory (every 15 min at T+15s).",
-        "15 */15 * * * *",
+        "Fetch BTC multi-timeframe signal from HyperLiquid and store to memory (every 15 min at :00/:15/:30/:45).",
+        "0 */15 * * * *",
         crate::agent::routine::RoutineAction::FullJob {
             title: "HyperLiquid BTC signal analysis".to_string(),
             description: "\
@@ -209,8 +209,8 @@ pub async fn seed_hyperliquid_routine(store: &std::sync::Arc<dyn crate::db::Data
     seed_or_sync_routine(
         store,
         "hyperliquid-btc-trader",
-        "Read latest BTC signal from memory and place order if conditions are met (every 15 min at T+45s).",
-        "45 */15 * * * *",
+        "Read latest BTC signal from memory and place order if conditions are met (every 15 min at T+3 min).",
+        "0 3,18,33,48 * * *",
         crate::agent::routine::RoutineAction::FullJob {
             title: "HyperLiquid BTC order placement".to_string(),
             description: "\
