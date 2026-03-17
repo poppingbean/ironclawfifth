@@ -174,26 +174,16 @@ pub async fn seed_hyperliquid_routine(store: &std::sync::Arc<dyn crate::db::Data
         crate::agent::routine::RoutineAction::FullJob {
             title: "HyperLiquid BTC signal analysis".to_string(),
             description: "\
-                Goal: fetch the latest BTC trading signal and persist it for the trader routine.\n\
+                FIRST ACTION: call hyperliquid_analyze now (no parameters). \
+                Do not call any other tool first. Do not call memory_write before hyperliquid_analyze returns.\n\
                 \n\
-                Step 1: call hyperliquid_analyze (no parameters).\n\
-                It fetches 250 BTC candles per timeframe directly from HyperLiquid (15m, 1h, 4h)\n\
-                and returns a JSON object with these fields:\n\
-                  signal          — LONG / SHORT / NEUTRAL\n\
-                  is_buy          — true (LONG) or false (SHORT) or null (NEUTRAL)\n\
-                  signal_score    — 0-100; >=60=LONG, <=40=SHORT, 41-59=NEUTRAL\n\
-                  limit_entry     — limit order price (0.4% buffer already applied)\n\
-                  take_profit     — TP trigger price\n\
-                  stop_loss       — SL trigger price\n\
-                  leverage        — 50 / 75 / 100 based on score distance from 50\n\
-                  rr_ratio        — reward:risk ratio\n\
-                  sl_pct_leveraged — % of margin at risk\n\
-                  atr_1h, atr_4h  — ATR values for context\n\
+                After hyperliquid_analyze returns its JSON result, immediately call memory_write with:\n\
+                  path    = 'btc/signal/latest'\n\
+                  content = the EXACT raw JSON string returned by hyperliquid_analyze\n\
+                Do not summarize, paraphrase, or modify the JSON. Copy it verbatim.\n\
+                Do not write to any other path (not daily/, not logs/, nothing else).\n\
                 \n\
-                Step 2: call memory_write with path='btc/signal/latest'\n\
-                and the FULL JSON result from Step 1 as the content string.\n\
-                \n\
-                Do nothing else. Do not place orders. Do not evaluate the signal."
+                Those are the only two tool calls for this job. Stop after memory_write succeeds."
                 .to_string(),
             max_iterations: 3,
             tool_permissions: vec![
