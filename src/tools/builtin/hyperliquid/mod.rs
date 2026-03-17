@@ -1,9 +1,9 @@
 //! HyperLiquid automated futures trading tools.
 //!
 //! Provides two builtin tools:
-//! - [`HyperliquidAnalyzeTool`]: fetches BTCUSDT multi-timeframe data from Binance Futures
-//!   and runs 14 technical indicators to produce a LONG/SHORT/NEUTRAL signal with
-//!   entry, take-profit, stop-loss, and leverage recommendation.
+//! - [`HyperliquidAnalyzeTool`]: fetches BTC multi-timeframe candle data directly from
+//!   the HyperLiquid exchange and runs 14 technical indicators to produce a
+//!   LONG/SHORT/NEUTRAL signal with entry, take-profit, stop-loss, and leverage recommendation.
 //! - [`HyperliquidTradeTool`]: places a GTC limit order on HyperLiquid perpetuals
 //!   with EIP-712 signing and the required builder fee tag.
 //!
@@ -127,13 +127,19 @@ pub async fn seed_hyperliquid_routine(store: &std::sync::Arc<dyn crate::db::Data
                 },
                 action: crate::agent::routine::RoutineAction::FullJob {
                     title: "HyperLiquid BTC 15m trade".to_string(),
-                    description: "Call hyperliquid_analyze (no parameters). \
-                        If the result contains is_buy (i.e. signal is LONG or SHORT, not NEUTRAL) \
-                        AND sl_pct_leveraged ≤ 0.40 AND rr_ratio ≥ 1.2, call hyperliquid_trade \
-                        with exactly these fields from the analysis output: \
-                        is_buy (boolean field from analysis), \
-                        price (use limit_entry), \
-                        take_profit, stop_loss, leverage. \
+                    description: "Step 1: call hyperliquid_analyze (no parameters). \
+                        It fetches 250 BTC candles per timeframe directly from HyperLiquid and \
+                        returns a JSON object — read ALL fields directly from that result, \
+                        do NOT call the json tool to parse or query it. \
+                        Step 2: check conditions — only proceed if: \
+                        signal is LONG or SHORT (not NEUTRAL), is_buy is present, \
+                        sl_pct_leveraged ≤ 0.40, rr_ratio ≥ 1.2. \
+                        Step 3: if all conditions pass, call hyperliquid_trade with: \
+                        is_buy (boolean, directly from analysis), \
+                        price (use limit_entry from analysis), \
+                        take_profit (from analysis), stop_loss (from analysis), \
+                        leverage (from analysis). \
+                        Position size is auto-calculated from account balance — omit size. \
                         Do NOT trade when signal is NEUTRAL or is_buy is absent."
                         .to_string(),
                     max_iterations: 10,
