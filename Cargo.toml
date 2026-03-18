@@ -184,6 +184,7 @@ hex = "0.4.3"
 
 # OpenClaw import (feature gated)
 json5 = { version = "0.4", optional = true }
+hyperliquid_rust_sdk = "0.6.0"
 
 # macOS keychain
 [target.'cfg(target_os = "macos")'.dependencies]

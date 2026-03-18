@@ -238,14 +238,35 @@ fn sign_hl_order_batch(
 
 // ── Price/size formatting ─────────────────────────────────────────────────────
 
-/// Round price to HyperLiquid BTC perp tick size (0.1 USD).
-fn format_price(price: f64) -> String {
-    format!("{:.1}", (price * 10.0).round() / 10.0)
+/// Format a float for HyperLiquid wire protocol.
+///
+/// Uses up to 8 decimal places, then strips trailing zeros and a trailing dot.
+/// This MUST match the official Python SDK's `float_to_wire` and the Rust SDK's
+/// `float_to_string_for_hashing` — the connection_id is computed over these strings,
+/// so any difference produces a signature that verifies to a wrong address.
+///
+/// Examples:
+///   95000.0  → "95000"
+///   94620.4  → "94620.4"
+///   0.001    → "0.001"
+///   0.0001   → "0.0001"
+fn hl_float_to_wire(x: f64) -> String {
+    let mut s = format!("{:.8}", x);
+    while s.ends_with('0') {
+        s.pop();
+    }
+    if s.ends_with('.') {
+        s.pop();
+    }
+    s
 }
 
-/// Round size to HyperLiquid BTC perp minimum increment (0.0001 BTC).
+fn format_price(price: f64) -> String {
+    hl_float_to_wire(price)
+}
+
 fn format_size(size: f64) -> String {
-    format!("{:.4}", (size * 10000.0).round() / 10000.0)
+    hl_float_to_wire(size)
 }
 
 // ── Balance helpers ───────────────────────────────────────────────────────────
@@ -1022,16 +1043,19 @@ mod tests {
 
     #[test]
     fn test_format_price() {
-        assert_eq!(format_price(94_620.35), "94620.4");
-        assert_eq!(format_price(95_000.0), "95000.0");
-        assert_eq!(format_price(100_000.05), "100000.1");
+        // Must match Python SDK float_to_wire / Rust SDK float_to_string_for_hashing
+        assert_eq!(format_price(95_000.0), "95000");
+        assert_eq!(format_price(94_620.4), "94620.4");
+        assert_eq!(format_price(84_819.92), "84819.92");
+        assert_eq!(format_price(100_000.1), "100000.1");
     }
 
     #[test]
     fn test_format_size() {
-        assert_eq!(format_size(0.01234), "0.0123");
-        assert_eq!(format_size(0.001), "0.0010");
-        assert_eq!(format_size(1.0), "1.0000");
+        assert_eq!(format_size(0.001), "0.001");
+        assert_eq!(format_size(0.0001), "0.0001");
+        assert_eq!(format_size(1.0), "1");
+        assert_eq!(format_size(0.12345678), "0.12345678");
     }
 
     #[test]
@@ -1302,10 +1326,10 @@ mod tests {
 
     #[test]
     fn test_allocation_pct_for_leverage() {
-        assert!((allocation_pct_for_leverage(100) - 0.10).abs() < f64::EPSILON);
-        assert!((allocation_pct_for_leverage(75) - 0.15).abs() < f64::EPSILON);
-        assert!((allocation_pct_for_leverage(50) - 0.30).abs() < f64::EPSILON);
-        assert!((allocation_pct_for_leverage(25) - 0.50).abs() < f64::EPSILON);
+        assert!((allocation_pct_for_leverage(40) - 0.20).abs() < f64::EPSILON);
+        assert!((allocation_pct_for_leverage(30) - 0.30).abs() < f64::EPSILON);
+        assert!((allocation_pct_for_leverage(20) - 0.40).abs() < f64::EPSILON);
+        assert!((allocation_pct_for_leverage(99) - 0.20).abs() < f64::EPSILON); // unknown → conservative default
     }
 
     #[test]

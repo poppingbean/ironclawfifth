@@ -458,8 +458,7 @@ impl Agent {
                     // Load initial event cache
                     engine.refresh_event_cache().await;
 
-                    // Seed domain-specific routines that require the DB to exist
-                    crate::tools::builtin::hyperliquid::seed_hyperliquid_routine(store).await;
+                    // Domain-specific routines (e.g. HyperLiquid) are created manually via CLI.
 
                     // Spawn notification forwarder (mirrors heartbeat pattern)
                     let channels = self.channels.clone();
